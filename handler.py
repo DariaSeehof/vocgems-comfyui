@@ -41,7 +41,6 @@ def start_comfyui():
         cwd="/workspace/ComfyUI"
     )
 
-    # Читаем логи ComfyUI в отдельном потоке
     def log_output():
         for line in comfyui_process.stdout:
             print(f"[ComfyUI] {line.decode('utf-8', errors='ignore').rstrip()}", flush=True)
@@ -66,59 +65,291 @@ def wait_for_comfyui():
     return False
 
 
-def build_prompt(params):
-    jewelry_types = {
-        "ring": "single elegant ring",
-        "earrings": "matching drop earrings pair",
-        "pendant": "single pendant necklace with delicate chain",
-        "necklace": "single statement necklace"
-    }
-    metals = {
-        "gold_750": "18k yellow gold setting, polished warm gold finish",
-        "white_gold": "18k white gold setting, rhodium plated silvery finish",
-        "rose_gold": "18k rose gold setting, romantic pink gold tone",
-        "platinum": "platinum 950 setting, prestigious cool metal finish"
-    }
-    styles = {
-        "modern": "modern minimalist design, clean lines, contemporary style",
-        "classic": "classic timeless design, traditional elegant setting",
-        "artdeco": "art deco geometric design, 1920s inspired, symmetric patterns",
-        "halo": "halo setting surrounded by brilliant diamonds, pave accents"
-    }
+# ─── НОРМАЛИЗАЦИЯ ВХОДНЫХ ДАННЫХ ──────────────────────────────────────────────
 
-    jewelry = jewelry_types.get(params.get("jewelry_type", "ring"), "elegant jewelry")
-    metal = metals.get(params.get("metal", "gold_750"), "18k gold setting")
-    style = styles.get(params.get("style", "modern"), "elegant design")
-    stone_type = params.get("stone_type", "emerald")
-    stone_carat = params.get("stone_carat", 3.0)
-    stone_color = params.get("stone_color", "vivid green")
-    stone_origin = params.get("stone_origin", "")
-    stone_cut = params.get("stone_cut", "emerald cut")
-    with_diamonds = params.get("with_diamonds", False)
-    custom_wishes = params.get("custom_wishes", "")
+def clean_str(value, default=""):
+    """Чистит строку от пробелов, пометок в скобках, мусора после запятой."""
+    if not value:
+        return default
+    s = str(value).strip()
+    # Убираем всё в скобках: "Vivid Green (GIA)" -> "Vivid Green"
+    if "(" in s:
+        s = s.split("(")[0].strip()
+    # Убираем всё после запятой: "Royal Blue, no heat" -> "Royal Blue"
+    if "," in s:
+        s = s.split(",")[0].strip()
+    return s or default
 
-    origin = f" {stone_origin}" if stone_origin else ""
-    diamonds = ", with small accent diamonds" if with_diamonds else ""
-    wishes = f", {custom_wishes}" if custom_wishes else ""
 
+def normalize_stone_type(raw):
+    """Приводит stone_type из WDK к каноническому виду в единственном числе."""
+    s = clean_str(raw, "gemstone").lower()
+    # Маппинг множественного числа и вариаций
+    mapping = {
+        "emeralds": "emerald", "emerald": "emerald",
+        "sapphires": "sapphire", "sapphire": "sapphire",
+        "rubies": "ruby", "ruby": "ruby",
+        "diamonds": "diamond", "diamond": "diamond",
+        "spinels": "spinel", "spinel": "spinel",
+        "tourmalines": "tourmaline", "tourmaline": "tourmaline",
+        "tanzanites": "tanzanite", "tanzanite": "tanzanite",
+        "aquamarines": "aquamarine", "aquamarine": "aquamarine",
+        "topazes": "topaz", "topaz": "topaz",
+        "garnets": "garnet", "garnet": "garnet",
+        "amethysts": "amethyst", "amethyst": "amethyst",
+        "opals": "opal", "opal": "opal",
+        "pearls": "pearl", "pearl": "pearl",
+        "morganites": "morganite", "morganite": "morganite",
+        "alexandrites": "alexandrite", "alexandrite": "alexandrite",
+    }
+    return mapping.get(s, s)  # неизвестные типы пропускаем как есть
+
+
+# ─── ШАБЛОНЫ ПО ТИПУ ИЗДЕЛИЯ ──────────────────────────────────────────────────
+#
+# Принцип: для каждого типа — свой шаблон композиции и свой негатив, который
+# жёстко запрещает все остальные типы. Тип изделия идёт ПЕРВЫМ словом в промпте,
+# повторяется 3+ раза (в начале, в середине, в конце) для закрепления концепта.
+#
+# Каждый шаблон — функция, которая получает (stone_phrase, metal, style_phrase,
+# diamonds_phrase, wishes_phrase) и возвращает (positive, negative).
+
+# Универсальная "хвостовая" часть позитива — техническое качество фото
+QUALITY_TAIL = (
+    "pure white seamless background, soft professional studio lighting, subtle shadows, "
+    "8k resolution, ultra detailed, sharp focus, crystal clear gemstone facets, "
+    "brilliant light reflections, luxury jewelry catalogue photography, "
+    "commercial advertising quality, macro photography"
+)
+
+# Универсальная "хвостовая" часть негатива — общее качество и анти-человек
+QUALITY_NEG = (
+    "woman, man, person, human, people, hand, hands, fingers, face, body, skin, "
+    "portrait, model, wearing, neck, ear, wrist, arm, finger, mannequin, nude, nsfw, "
+    "cartoon, illustration, painting, sketch, drawing, anime, fantasy, unrealistic, "
+    "3d render, CGI, plastic, toy, "
+    "blurry, out of focus, low quality, pixelated, watermark, text, logo, signature, "
+    "bad proportions, deformed, distorted metal, floating stones, impossible geometry, "
+    "cluttered background, busy background, multiple backgrounds"
+)
+
+
+def build_ring_prompt(stone, metal, style, diamonds, wishes):
     positive = (
-        f"vocgems jewelry, photorealistic jewelry product photography, studio lighting, "
-        f"{jewelry} with {stone_carat} carat {stone_color}{origin} {stone_type}, "
-        f"{stone_cut} cut, natural gemstone, excellent clarity, "
-        f"{metal}, {style}{diamonds}{wishes}, "
-        f"pure white background, soft professional lighting, subtle shadows, "
-        f"8k resolution, highly detailed, sharp focus, crystal clear gemstone facets, "
-        f"brilliant reflections, luxury jewelry catalogue, commercial advertising quality, "
-        f"isolated product shot, single item centered, no people, product only, one piece only"
+        f"a single ring, one ring, ring jewelry, "
+        f"vocgems jewelry, photorealistic product photography of one ring, "
+        f"the ring features {stone}, {stone} set in {metal}, "
+        f"{style}{diamonds}{wishes}, "
+        f"single ring centered in frame, top-down three-quarter view of one ring, "
+        f"{QUALITY_TAIL}"
     )
     negative = (
-        "woman, man, person, human, people, hand, hands, fingers, face, body, skin, "
-        "portrait, model, wearing, neck, ear, wrist, arm, nude, nsfw, "
-        "multiple items, two rings, pair of rings, many pieces, duplicates, copies, "
-        "cartoon, illustration, painting, sketch, 3d render, CGI, anime, fantasy, unrealistic, "
-        "blurry, low quality, pixelated, watermark, text, logo, "
-        "bad proportions, deformed, distorted metal, floating stones, impossible geometry"
+        "earrings, pair of earrings, two earrings, drop earrings, stud earrings, "
+        "pendant, necklace, chain, bracelet, brooch, pin, "
+        "two rings, multiple rings, pair of rings, "
+        "human ear, human finger, "
+        + QUALITY_NEG
     )
+    return positive, negative
+
+
+def build_earrings_prompt(stone, metal, style, diamonds, wishes):
+    positive = (
+        f"a pair of earrings, two matching earrings, earring pair, "
+        f"vocgems jewelry, photorealistic product photography of a pair of earrings, "
+        f"two identical earrings displayed side by side, both earrings visible, "
+        f"each earring features {stone}, {stone} set in {metal}, "
+        f"{style}{diamonds}{wishes}, "
+        f"symmetrical pair of earrings centered in frame, "
+        f"matching pair of earrings, mirror image earrings, "
+        f"{QUALITY_TAIL}"
+    )
+    negative = (
+        "ring, single ring, one ring, finger ring, "
+        "pendant, necklace, chain, bracelet, brooch, pin, "
+        "single earring, just one earring, lone earring, mismatched earrings, "
+        "asymmetric earrings, three earrings, "
+        + QUALITY_NEG
+    )
+    return positive, negative
+
+
+def build_pendant_prompt(stone, metal, style, diamonds, wishes):
+    positive = (
+        f"a pendant on a chain, pendant necklace, single pendant, "
+        f"vocgems jewelry, photorealistic product photography of a pendant, "
+        f"the pendant features {stone}, {stone} set in {metal} pendant setting, "
+        f"{style}{diamonds}{wishes}, "
+        f"delicate {metal} chain, pendant hanging from thin chain, "
+        f"single pendant centered in frame, vertical orientation, "
+        f"{QUALITY_TAIL}"
+    )
+    negative = (
+        "ring, finger ring, "
+        "earrings, pair of earrings, two earrings, "
+        "bracelet, wrist jewelry, brooch, pin, "
+        "thick chain, choker, multiple pendants, "
+        + QUALITY_NEG
+    )
+    return positive, negative
+
+
+def build_necklace_prompt(stone, metal, style, diamonds, wishes):
+    positive = (
+        f"a statement necklace, full necklace, fine jewelry necklace, "
+        f"vocgems jewelry, photorealistic product photography of a necklace, "
+        f"the necklace features {stone} as centerpiece, {stone} set in {metal}, "
+        f"{style}{diamonds}{wishes}, "
+        f"complete necklace laid flat in U-shape, full chain visible, "
+        f"single necklace centered in frame, "
+        f"{QUALITY_TAIL}"
+    )
+    negative = (
+        "ring, finger ring, "
+        "earrings, pair of earrings, two earrings, "
+        "bracelet, wrist jewelry, brooch, pin, "
+        "small pendant only, just a pendant, partial necklace, "
+        + QUALITY_NEG
+    )
+    return positive, negative
+
+
+def build_bracelet_prompt(stone, metal, style, diamonds, wishes):
+    positive = (
+        f"a bracelet, fine jewelry bracelet, single bracelet, "
+        f"vocgems jewelry, photorealistic product photography of a bracelet, "
+        f"the bracelet features {stone}, {stone} set in {metal} bracelet, "
+        f"{style}{diamonds}{wishes}, "
+        f"complete bracelet laid flat in circular shape, full bracelet visible, "
+        f"single bracelet centered in frame, horizontal orientation, "
+        f"{QUALITY_TAIL}"
+    )
+    negative = (
+        "ring, finger ring, "
+        "earrings, pair of earrings, two earrings, "
+        "necklace, chain, pendant, brooch, pin, "
+        "watch, wristwatch, multiple bracelets, stacked bracelets, "
+        + QUALITY_NEG
+    )
+    return positive, negative
+
+
+def build_brooch_prompt(stone, metal, style, diamonds, wishes):
+    positive = (
+        f"a brooch, decorative brooch pin, single brooch, "
+        f"vocgems jewelry, photorealistic product photography of a brooch, "
+        f"the brooch features {stone}, {stone} set in {metal} brooch, "
+        f"ornamental brooch with pin back, {style}{diamonds}{wishes}, "
+        f"single brooch centered in frame, top-down view of brooch, "
+        f"{QUALITY_TAIL}"
+    )
+    negative = (
+        "ring, finger ring, "
+        "earrings, pair of earrings, two earrings, "
+        "necklace, chain, pendant, bracelet, "
+        "fabric, clothing, garment, "
+        "multiple brooches, "
+        + QUALITY_NEG
+    )
+    return positive, negative
+
+
+# Роутер — выбирает шаблон по типу
+JEWELRY_BUILDERS = {
+    "ring":     build_ring_prompt,
+    "earrings": build_earrings_prompt,
+    "pendant":  build_pendant_prompt,
+    "necklace": build_necklace_prompt,
+    "bracelet": build_bracelet_prompt,
+    "brooch":   build_brooch_prompt,
+}
+
+
+# ─── СЛОВАРИ ДЛЯ МЕТАЛЛА И СТИЛЯ ──────────────────────────────────────────────
+
+METALS = {
+    "gold_750":   "18k yellow gold, polished warm gold finish",
+    "white_gold": "18k white gold, rhodium plated silvery finish",
+    "rose_gold":  "18k rose gold, romantic pink gold tone",
+    "platinum":   "platinum 950, prestigious cool metal finish",
+}
+
+# Сокращённый набор стилей — 4 вместо 10. Меньше противоречий в промпте.
+# Если фронт пришлёт старое значение — мапим в одно из этих 4.
+STYLES = {
+    "classic":   "classic timeless elegant design, refined traditional setting",
+    "modern":    "modern minimalist design, clean geometric lines, contemporary",
+    "vintage":   "vintage inspired design, art deco details, ornate antique style",
+    "statement": "bold statement design, halo setting with pave diamond accents, dramatic",
+}
+
+# Маппинг старых значений стиля в новые 4
+STYLE_LEGACY_MAP = {
+    "minimalist":   "modern",
+    "futuristic":   "modern",
+    "artdeco":      "vintage",
+    "artnouveau":   "vintage",
+    "victorian":    "vintage",
+    "geometric":    "modern",
+    "halo":         "statement",
+    "highjewelry":  "statement",
+}
+
+
+def build_prompt(params):
+    # 1. Чистим и нормализуем все входные параметры
+    jewelry_type  = clean_str(params.get("jewelry_type"), "ring").lower()
+    stone_type    = normalize_stone_type(params.get("stone_type"))
+    stone_color   = clean_str(params.get("stone_color"))
+    stone_origin  = clean_str(params.get("stone_origin"))
+    stone_cut     = clean_str(params.get("stone_cut")).lower()
+    custom_wishes = clean_str(params.get("custom_wishes") or params.get("wishes"))
+    metal_key     = clean_str(params.get("metal"), "gold_750").lower()
+    style_key     = clean_str(params.get("style"), "modern").lower()
+    with_diamonds = bool(params.get("with_diamonds", False))
+
+    # stone_carat — число
+    try:
+        stone_carat = float(params.get("stone_carat") or 1.0)
+    except (TypeError, ValueError):
+        stone_carat = 1.0
+
+    # 2. Маппим стиль (старые значения -> новые 4)
+    if style_key in STYLE_LEGACY_MAP:
+        style_key = STYLE_LEGACY_MAP[style_key]
+
+    # 3. Собираем "фразу о камне" — она вставляется в позитив несколько раз
+    color_part = f"{stone_color} " if stone_color else ""
+    origin_part = f"from {stone_origin}" if stone_origin else ""
+    cut_part = f"{stone_cut} cut" if stone_cut else "faceted cut"
+
+    stone_phrase = (
+        f"a {stone_carat} carat {color_part}natural {stone_type} {origin_part}, "
+        f"{cut_part}, excellent clarity, brilliant gemstone"
+    ).strip()
+
+    # 4. Подставляем металл и стиль
+    metal_phrase = METALS.get(metal_key, METALS["gold_750"])
+    style_phrase = STYLES.get(style_key, STYLES["modern"])
+
+    diamonds_phrase = ", with small accent diamonds" if with_diamonds else ""
+    wishes_phrase = f", {custom_wishes}" if custom_wishes else ""
+
+    # 5. Выбираем шаблон по типу изделия
+    builder = JEWELRY_BUILDERS.get(jewelry_type)
+    if not builder:
+        # Неизвестный тип — фоллбэк на ring, чтобы хоть что-то осмысленное
+        print(f"WARNING: unknown jewelry_type '{jewelry_type}', falling back to ring", flush=True)
+        builder = build_ring_prompt
+
+    positive, negative = builder(
+        stone_phrase, metal_phrase, style_phrase, diamonds_phrase, wishes_phrase
+    )
+
+    print(f"=== PROMPT for {jewelry_type} ({stone_type}) ===", flush=True)
+    print(f"POSITIVE: {positive}", flush=True)
+    print(f"NEGATIVE: {negative}", flush=True)
+
     return positive, negative
 
 
