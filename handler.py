@@ -128,6 +128,75 @@ STYLE_LEGACY_MAP = {
 }
 
 
+# ─── ЦВЕТОВАЯ ЛОГИКА ─────────────────────────────────────────────────────────
+# Дефолтный цвет, к которому модель тянется по умолчанию для каждого камня.
+# Если просят необычный цвет — добавляем дефолтный в негатив, чтобы модель
+# не сваливалась к привычному.
+STONE_DEFAULT_COLORS = {
+    "ruby":        ["red"],
+    "emerald":     ["green"],
+    "sapphire":    ["blue", "deep blue", "royal blue"],
+    "spinel":      ["pink", "red", "hot pink"],
+    "tourmaline":  ["pink", "green"],
+    "tanzanite":   ["violet", "purple-blue"],
+    "aquamarine":  ["light blue"],
+    "topaz":       ["yellow", "blue"],
+    "garnet":      ["red", "deep red"],
+    "amethyst":    ["purple"],
+    "morganite":   ["pink", "peach"],
+    "alexandrite": ["green"],
+    "diamond":     ["white", "colorless"],
+    "pearl":       ["white"],
+    "opal":        ["white"],
+}
+
+# Слова-модификаторы, сигналящие о нестандартном/редком цвете.
+# Если в stone_color встречается хоть одно — цвет получает усиленный вес.
+UNUSUAL_COLOR_MARKERS = {
+    "pastel", "light", "pale", "soft", "muted",
+    "dark", "deep",
+    "grey", "gray", "champagne", "peach", "salmon",
+    "cognac", "honey", "lavender", "lilac", "mint",
+    "teal", "olive", "neon", "smoky", "smokey",
+}
+
+
+def is_unusual_color(stone_color, stone_type):
+    """True если цвет нестандартный для этого камня — нужен усиленный вес."""
+    if not stone_color:
+        return False
+    color_lower = stone_color.lower()
+    # Любой маркер-модификатор → нестандартный
+    for marker in UNUSUAL_COLOR_MARKERS:
+        if marker in color_lower:
+            return True
+    # Цвет НЕ совпадает с дефолтным для этого камня → нестандартный
+    defaults = STONE_DEFAULT_COLORS.get(stone_type, [])
+    if defaults:
+        for default in defaults:
+            if default in color_lower:
+                return False
+        return True  # цвет указан, но не из дефолтного списка
+    return False
+
+
+def build_color_negative(stone_color, stone_type):
+    """Возвращает строку с дефолтными цветами камня для негатива.
+    Только если цвет нестандартный."""
+    if not is_unusual_color(stone_color, stone_type):
+        return ""
+    defaults = STONE_DEFAULT_COLORS.get(stone_type, [])
+    if not defaults:
+        return ""
+    # Не запрещаем тот цвет, который сами просим
+    color_lower = stone_color.lower() if stone_color else ""
+    filtered = [d for d in defaults if d not in color_lower and color_lower not in d]
+    if not filtered:
+        return ""
+    return ", ".join(f"{d} {stone_type}" for d in filtered)
+
+
+
 def build_prompt(params):
     jewelry_type  = clean_str(params.get("jewelry_type"), "ring").lower()
     stone_type    = normalize_stone_type(params.get("stone_type"))
@@ -150,17 +219,25 @@ def build_prompt(params):
     anchor = JEWELRY_ANCHORS.get(jewelry_type, "elegant jewelry")
     weighted_anchor = f"({anchor}:1.4)"
 
-    color_part = f"{stone_color} " if stone_color else ""
-    origin_part = f"{stone_origin} " if stone_origin else ""
+    # Цвет: если нестандартный — вес 1.7, иначе 1.5. Плюс дублирование.
+    color_weight = 1.7 if is_unusual_color(stone_color, stone_type) else 1.5
+    if stone_color:
+        weighted_color = f"({stone_color}:{color_weight})"
+        color_emphasis = f"{weighted_color} {stone_type}, {stone_color} colored gemstone, "
+    else:
+        weighted_color = ""
+        color_emphasis = f"{stone_type}, "
+
+    origin_part = f", from {stone_origin}" if stone_origin else ""
     cut_part = f"{stone_cut} cut" if stone_cut else "faceted cut"
-    stone_desc = f"{stone_carat} carat {color_part}{origin_part}{stone_type}, {cut_part}"
+    stone_desc = f"{color_emphasis}{stone_carat} carat, {cut_part}{origin_part}"
 
     metal_phrase = METALS.get(metal_key, METALS["gold_750"])
     style_phrase = STYLES.get(style_key, STYLES["modern"])
     diamonds_phrase = ", with small accent diamonds" if with_diamonds else ""
     wishes_phrase = f", {custom_wishes}" if custom_wishes else ""
 
-    # ПОЗИТИВ — короткий, ровно по 9-апрельской структуре
+    # ПОЗИТИВ — короткий, по 9-апрельской структуре, цвет упомянут дважды
     positive = (
         f"vocgems jewelry, {weighted_anchor}, "
         f"photorealistic jewelry photography, "
@@ -173,6 +250,8 @@ def build_prompt(params):
 
     # НЕГАТИВ — усиленный, с весами на анти-человек термины
     type_neg = JEWELRY_NEG.get(jewelry_type, "")
+    color_neg = build_color_negative(stone_color, stone_type)
+    color_neg_part = f"{color_neg}, " if color_neg else ""
     negative = (
         f"(woman:1.6), (man:1.6), (person:1.6), (human:1.6), (people:1.6), "
         f"(face:1.6), (portrait:1.6), (model:1.6), "
@@ -181,6 +260,7 @@ def build_prompt(params):
         f"earlobe, eye, eyes, hair, lips, mouth, nose, "
         f"mannequin, doll, statue, "
         f"{type_neg}, "
+        f"{color_neg_part}"
         f"cartoon, illustration, painting, sketch, anime, 3d render, CGI, "
         f"blurry, low quality, deformed, floating stones, "
         f"watermark, text, logo, "
