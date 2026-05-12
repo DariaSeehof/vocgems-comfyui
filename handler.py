@@ -29,6 +29,17 @@ def start_comfyui():
     elif not os.path.exists(lora_src):
         print(f"WARNING: LoRA not found at {lora_src}", flush=True)
 
+    # Линкуем checkpoint (базовую модель) с Network Volume
+    ckpt_src = os.environ.get("CKPT_PATH", "/runpod-volume/checkpoints/realisticVisionV60B1_v60B1VAE.safetensors")
+    ckpt_dst = "/workspace/ComfyUI/models/checkpoints/realisticVisionV60B1_v60B1VAE.safetensors"
+
+    if os.path.exists(ckpt_src) and not os.path.exists(ckpt_dst):
+        os.makedirs("/workspace/ComfyUI/models/checkpoints", exist_ok=True)
+        os.symlink(ckpt_src, ckpt_dst)
+        print(f"Checkpoint linked: {ckpt_src} -> {ckpt_dst}", flush=True)
+    elif not os.path.exists(ckpt_src):
+        print(f"WARNING: Checkpoint not found at {ckpt_src}", flush=True)
+
     print("Launching ComfyUI process...", flush=True)
     comfyui_process = subprocess.Popen(
         ["python", "main.py", "--listen", "127.0.0.1", "--port", "8188"],
@@ -291,7 +302,7 @@ def get_workflow(positive, negative, seed=None):
                 "seed": seed, "steps": 30
             }
         },
-        "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "epicRealism.safetensors"}},
+        "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "realisticVisionV60B1_v60B1VAE.safetensors"}},
         "5": {"class_type": "EmptyLatentImage", "inputs": {"batch_size": 1, "height": 768, "width": 768}},
         "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["10", 1], "text": positive}},
         "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["10", 1], "text": negative}},
