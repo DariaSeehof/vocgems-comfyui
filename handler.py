@@ -1,8 +1,8 @@
 """
 VOC Gems RunPod Serverless Handler
-v6.1: усиленный негатив (руки/цветы/ткань), поднятые Canny thresholds,
-      снижен ControlNet strength и end_percent — Canny ловит только контур камня,
-      модель свободна в дизайне оправы и обязана делать белый фон.
+v6.2: Juggernaut Reborn (product-photography checkpoint) + ControlNet Tile.
+      Tile передаёт цвет камня с референса, не контуры.
+      Juggernaut архитектурно склонен к чистому белому фону.
 """
 
 import runpod
@@ -17,13 +17,17 @@ import os
 
 comfyui_process = None
 
-# ─── ControlNet параметры (захардкожены, тюним без передеплоя через правку этих констант) ───
-CONTROLNET_MODEL = "control_v11p_sd15_canny.pth"
-CONTROLNET_STRENGTH = 0.45         # снижено: камень узнаваемый, но модель свободна в дизайне
+# ─── Базовая модель (checkpoint) ───
+CHECKPOINT_NAME = "juggernaut_reborn.safetensors"
+
+# ─── ControlNet параметры ───
+# Tile передаёт ЦВЕТ и общую структуру референса, а не контуры.
+# Это означает: цвет камня будет точно с фото, форма даст модели больше свободы,
+# фон/рука/ткань референса будут размыты и не повлияют на финальный фон.
+CONTROLNET_MODEL = "control_v11f1e_sd15_tile.pth"
+CONTROLNET_STRENGTH = 0.55         # Tile нужна чуть бОльшая сила чем Canny
 CONTROLNET_START_PERCENT = 0.0
-CONTROLNET_END_PERCENT = 0.55      # отпускаем контроль на 55% генерации — оправа и фон финализируются без него
-CANNY_LOW_THRESHOLD = 0.75         # высокий порог: ловим только сильные контуры (грани камня)
-CANNY_HIGH_THRESHOLD = 0.95        # игнорируем слабые линии: руки, ткань, складки бумаги
+CONTROLNET_END_PERCENT = 0.5       # отпускаем контроль на половине, оправа и фон финализируются свободно
 REFERENCE_FILENAME = "vocgems_reference.png"
 
 
@@ -43,8 +47,8 @@ def start_comfyui():
         print(f"WARNING: LoRA not found at {lora_src}", flush=True)
 
     # ─── Симлинк Checkpoint ───
-    ckpt_src = os.environ.get("CKPT_PATH", "/runpod-volume/checkpoints/realisticVisionV60B1_v60B1VAE.safetensors")
-    ckpt_dst = "/workspace/ComfyUI/models/checkpoints/realisticVisionV60B1_v60B1VAE.safetensors"
+    ckpt_src = os.environ.get("CKPT_PATH", f"/runpod-volume/checkpoints/{CHECKPOINT_NAME}")
+    ckpt_dst = f"/workspace/ComfyUI/models/checkpoints/{CHECKPOINT_NAME}"
 
     if os.path.exists(ckpt_src) and not os.path.exists(ckpt_dst):
         os.makedirs("/workspace/ComfyUI/models/checkpoints", exist_ok=True)
@@ -368,7 +372,7 @@ def get_workflow_basic(positive, negative, seed=None):
                 "seed": seed, "steps": 30
             }
         },
-        "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "realisticVisionV60B1_v60B1VAE.safetensors"}},
+        "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": CHECKPOINT_NAME}},
         "5": {"class_type": "EmptyLatentImage", "inputs": {"batch_size": 1, "height": 768, "width": 768}},
         "6": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["10", 1], "text": positive}},
         "7": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["10", 1], "text": negative}},
@@ -395,7 +399,7 @@ def get_workflow_controlnet(positive, negative, reference_filename, seed=None):
         # ─── Базовые ноды (как в basic workflow) ───
         "4": {
             "class_type": "CheckpointLoaderSimple",
-            "inputs": {"ckpt_name": "realisticVisionV60B1_v60B1VAE.safetensors"}
+            "inputs": {"ckpt_name": CHECKPOINT_NAME}
         },
         "5": {
             "class_type": "EmptyLatentImage",
@@ -417,17 +421,21 @@ def get_workflow_controlnet(positive, negative, reference_filename, seed=None):
             "inputs": {"clip": ["10", 1], "text": negative}
         },
 
-        # ─── ControlNet цепочка ───
+        # ─── ControlNet Tile цепочка ───
+        # LoadImage → ImageScale (приводим к 768) → ControlNetApplyAdvanced
+        # Tile НЕ требует препроцессора с обработкой контуров — он работает напрямую с RGB.
         "20": {
             "class_type": "LoadImage",
             "inputs": {"image": reference_filename}
         },
         "21": {
-            "class_type": "Canny",
+            "class_type": "ImageScale",
             "inputs": {
                 "image": ["20", 0],
-                "low_threshold": CANNY_LOW_THRESHOLD,
-                "high_threshold": CANNY_HIGH_THRESHOLD
+                "upscale_method": "lanczos",
+                "width": 768,
+                "height": 768,
+                "crop": "center"
             }
         },
         "22": {
