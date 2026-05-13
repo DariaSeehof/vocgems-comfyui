@@ -1,12 +1,13 @@
 """
 VOC Gems RunPod Serverless Handler
-v6.5: фикс перетекания цвета камня в металл (Vivid Pink → Yellow).
-      - METALS: одна фраза с весом 1.3 (было три фразы 1.5+1.4+1.3)
-      - UNUSUAL_COLOR_MARKERS: добавлены vivid/bright/saturated/crimson/
-        raspberry/magenta/rubellite/wine (детектор ловит "Vivid Pink")
-      - Anti-warm-tone в негативе камня при тёплом металле vs прохладном камне
-      - Порядок в позитиве: камень → стиль → металл → ЯКОРЬ цвета камня
-      - Tile поднят: strength=0.4, end_percent=0.5
+v6.6: поддержка бледных/прозрачных камней (Moonstone, Opal, Pearl, Diamond,
+      Pastel/Light/Milky-цвета).
+      - WEAK_VISUAL_STONES: камни с слабым цветовым сигналом → Tile понижен
+      - PALE_COLOR_MARKERS: бледные цвета (pastel, light, milky) → Tile средний
+      - STONE_DESCRIPTORS: специфичные якоря по типу камня
+      - CABOCHON_DEFAULT_STONES: лунный/опал/жемчуг идут как cabochon
+      - Anti-warm-tone защита для прозрачных камней (мягче, вес 1.4)
+      - Adaptive ControlNet: strength/end_percent зависят от силы сигнала
 """
 
 import runpod
@@ -26,12 +27,16 @@ CHECKPOINT_NAME = "juggernaut_reborn.safetensors"
 
 # ─── ControlNet параметры ───
 # Tile передаёт ЦВЕТ и общую структуру референса, а не контуры.
-# Это означает: цвет камня будет точно с фото, форма даст модели больше свободы,
-# фон/рука/ткань референса будут размыты и не повлияют на финальный фон.
+# v6.6: три пресета силы. Strong для ярких/чётких камней, weak для прозрачных
+# (чтобы Tile не тащил белый фон референса в композицию).
 CONTROLNET_MODEL = "control_v11f1e_sd15_tile.pth"
-CONTROLNET_STRENGTH = 0.4          # v6.5: поднято с 0.3, чтобы Tile дольше удерживал ЦВЕТ камня
-CONTROLNET_START_PERCENT = 0.0
-CONTROLNET_END_PERCENT = 0.5       # v6.5: поднято с 0.35 — Tile отпускается позже, цвет защищён
+
+CONTROLNET_PRESETS = {
+    "strong": {"strength": 0.4, "start": 0.0, "end": 0.5},   # яркие камни (рубеллит, изумруд)
+    "medium": {"strength": 0.3, "start": 0.0, "end": 0.4},   # бледные цветные (Pastel Pink спинель)
+    "weak":   {"strength": 0.2, "start": 0.0, "end": 0.3},   # прозрачные (лунный камень, опал, бриллиант)
+}
+CONTROLNET_DEFAULT_PRESET = "strong"
 REFERENCE_FILENAME = "vocgems_reference.png"
 
 
@@ -233,6 +238,65 @@ UNUSUAL_COLOR_MARKERS = {
     "burgundy", "coral", "apricot", "amber",
 }
 
+# v6.6: камни со слабым цветовым сигналом на фото (прозрачные, молочные, перламутровые).
+# Для них Tile НЕ должен тащить контекст референса — иначе камень исчезает,
+# а в кадр приходит белая замша/палец/коробка с реф-фото.
+WEAK_VISUAL_STONES = {
+    "moonstone", "opal", "pearl", "diamond",
+}
+
+# v6.6: маркеры бледных цветов — для них Tile среднего уровня
+# (камень есть, но цветовой сигнал на референсе слабый)
+PALE_COLOR_MARKERS = {
+    "pastel", "light", "pale", "soft", "milky", "dusty", "powder", "baby",
+}
+
+# v6.6: специфичные дескрипторы по типу камня. Используются как якорь в позитиве
+# ВМЕСТО универсального `vivid {color} {stone} center stone`. Для камней которых
+# нет в этом словаре — fallback на универсальный якорь.
+STONE_DESCRIPTORS = {
+    "moonstone":  "(adularescent moonstone:1.5), (milky white cabochon with blue sheen:1.4), translucent gem",
+    "opal":       "(opalescent gemstone:1.5), (rainbow play of color:1.4), (iridescent:1.3)",
+    "pearl":      "(lustrous pearl:1.5), (iridescent pearl surface:1.4), nacre shimmer",
+    "diamond":    "(brilliant cut diamond:1.5), (fire and scintillation:1.4), colorless transparent gemstone",
+    "tanzanite":  "(tanzanite gemstone:1.5), (violet-blue dichroic:1.4)",
+    "alexandrite":"(alexandrite gemstone:1.5), (color-changing green-purple:1.4)",
+}
+
+# v6.6: камни которые в реальном каталоге почти всегда кабошоны.
+# Если фронт прислал stone_cut типа "Cushion" для лунного камня — игнорируем,
+# ставим cabochon. Сохраняем "огранка" как opt-out: если в stone_cut есть слова
+# "faceted/round/oval/cushion/emerald/marquise" И это лунный камень — оставляем
+# как есть (значит редкий фасетированный экземпляр).
+CABOCHON_DEFAULT_STONES = {
+    "moonstone", "opal", "pearl",
+}
+
+
+def get_controlnet_preset(stone_type, stone_color):
+    """Выбирает пресет силы ControlNet по типу камня и цвету.
+    weak — прозрачные/молочные камни (moonstone, opal, pearl, diamond)
+    medium — камни с бледным цветом (Pastel Pink spinel)
+    strong — всё остальное (яркие цветные камни)"""
+    if stone_type in WEAK_VISUAL_STONES:
+        return "weak"
+    if stone_color:
+        color_lower = stone_color.lower()
+        for marker in PALE_COLOR_MARKERS:
+            if marker in color_lower:
+                return "medium"
+    return "strong"
+
+
+def build_stone_descriptor(stone_type, stone_color):
+    """Возвращает якорь-описание камня для позитива (вставляется после металла).
+    Специфичный по типу если есть в STONE_DESCRIPTORS, иначе универсальный по цвету."""
+    if stone_type in STONE_DESCRIPTORS:
+        return STONE_DESCRIPTORS[stone_type]
+    if stone_color:
+        return f"(vivid {stone_color} {stone_type} center stone:1.4)"
+    return ""
+
 
 def is_unusual_color(stone_color, stone_type):
     if not stone_color:
@@ -291,20 +355,35 @@ def build_prompt(params):
     if stone_color:
         weighted_color = f"({stone_color}:{color_weight})"
         color_emphasis = f"{weighted_color} {stone_type}, {stone_color} colored gemstone, "
-        # v6.5: ЯКОРЬ цвета камня — повторяем после металла, чтобы металл не перетягивал гамму
-        color_anchor = f", (vivid {stone_color} {stone_type} center stone:1.4)"
     else:
         color_emphasis = f"{stone_type}, "
-        color_anchor = ""
+
+    # v6.6: для лунного камня/опала/жемчуга принудительно cabochon
+    # (фронт может прислать "Cushion" из WDK — но это почти всегда ошибка
+    # для этих типов; реальный каталог = выпуклый кабошон).
+    if stone_type in CABOCHON_DEFAULT_STONES:
+        cut_part = "(cabochon:1.4)"
+    elif stone_cut:
+        cut_part = f"{stone_cut} cut"
+    else:
+        cut_part = "faceted cut"
 
     origin_part = f", from {stone_origin}" if stone_origin else ""
-    cut_part = f"{stone_cut} cut" if stone_cut else "faceted cut"
     stone_desc = f"{color_emphasis}{stone_carat} carat, {cut_part}{origin_part}"
 
     metal_phrase = METALS.get(metal_key, METALS["gold_750"])
     style_phrase = STYLES.get(style_key, STYLES["modern"])
     diamonds_phrase = ", with small accent diamonds" if with_diamonds else ""
     wishes_phrase = f", {custom_wishes}" if custom_wishes else ""
+
+    # v6.6: якорь — специфичный по типу камня если есть в STONE_DESCRIPTORS,
+    # иначе универсальный по цвету (как в v6.5)
+    stone_descriptor = build_stone_descriptor(stone_type, stone_color)
+    descriptor_part = f", {stone_descriptor}" if stone_descriptor else ""
+
+    # v6.6: выбор пресета силы ControlNet
+    cn_preset_name = get_controlnet_preset(stone_type, stone_color)
+    cn_preset = CONTROLNET_PRESETS[cn_preset_name]
 
     # v6.5: новый порядок — камень → стиль/композиция → металл → ЯКОРЬ цвета камня.
     # Это даёт модели сначала "увидеть" камень, потом стиль, и только в конце уточнить металл.
@@ -316,7 +395,7 @@ def build_prompt(params):
         f"{stone_desc}, "
         f"{style_phrase}{diamonds_phrase}{wishes_phrase}, "
         f"{metal_phrase}"
-        f"{color_anchor}, "
+        f"{descriptor_part}, "
         f"(pure white seamless background:1.6), "
         f"(plain white studio backdrop:1.5), "
         f"professional studio lighting, soft shadows, "
@@ -331,21 +410,30 @@ def build_prompt(params):
     metal_neg = METAL_NEG.get(metal_key, "")
     metal_neg_part = f"{metal_neg}, " if metal_neg else ""
 
-    # v6.5: защита камня от тёплого металла (yellow/rose gold).
-    # Если камень "холодный" (синий/зелёный/розовый/фиолетовый), а металл тёплый —
-    # пишем в негатив, что камень НЕ должен быть жёлтым/золотым.
+    # v6.5/v6.6: защита камня от тёплого металла.
+    # v6.5: только cold-coloured камни при warm-металле, вес 1.6
+    # v6.6: + прозрачные камни (weak_visual) при warm-металле, вес 1.4 (мягче,
+    # чтобы не сделать камень совсем бесцветным и не убрать золотые рефлексы)
     metal_tone = METAL_TONE.get(metal_key, "warm")
     cold_stone_colors = {"pink", "blue", "green", "violet", "purple", "magenta",
                          "fuchsia", "lavender", "lilac", "teal", "mint", "raspberry",
                          "crimson", "rubellite"}
     stone_is_cold = stone_color and any(c in stone_color.lower() for c in cold_stone_colors)
+    stone_is_transparent = stone_type in WEAK_VISUAL_STONES
+
     stone_color_anti_metal = ""
     if metal_tone == "warm" and stone_is_cold:
-        # Камень не должен утечь в жёлтый из-за золота
         stone_color_anti_metal = (
             f"(yellow {stone_type}:1.6), (gold colored stone:1.5), "
             f"(yellow gemstone:1.5), (warm tinted stone:1.4), "
             f"(metallic colored stone:1.4), "
+        )
+    elif metal_tone == "warm" and stone_is_transparent:
+        # Прозрачный камень не должен пожелтеть от рефлексов золота, но не давим
+        # слишком сильно — рефлексы должны остаться
+        stone_color_anti_metal = (
+            f"(yellow {stone_type}:1.4), (gold colored {stone_type}:1.3), "
+            f"(opaque yellow stone:1.3), "
         )
 
     negative = (
@@ -372,12 +460,20 @@ def build_prompt(params):
         f"two stones, multiple gems, pearl, pearls, sphere, beads"
     )
 
+    # v6.6: лунный/опал/жемчуг — НЕ должны попадать в "pearl, pearls, sphere, beads"
+    # в негативе, иначе модель будет избегать сферической/перламутровой формы
+    if stone_type in {"moonstone", "opal", "pearl"}:
+        negative = negative.replace(", pearl, pearls, sphere, beads", "")
+
     print(f"=== PROMPT for {jewelry_type} ({stone_type}) ===", flush=True)
-    print(f"=== unusual_color={unusual}, metal_tone={metal_tone}, stone_is_cold={stone_is_cold} ===", flush=True)
+    print(f"=== unusual_color={unusual}, metal_tone={metal_tone}, "
+          f"stone_is_cold={stone_is_cold}, stone_is_transparent={stone_is_transparent}, "
+          f"cn_preset={cn_preset_name} (strength={cn_preset['strength']}, end={cn_preset['end']}) ===",
+          flush=True)
     print(f"POSITIVE: {positive}", flush=True)
     print(f"NEGATIVE: {negative}", flush=True)
 
-    return positive, negative
+    return positive, negative, cn_preset
 
 
 # ─── REFERENCE IMAGE DOWNLOAD ─────────────────────────────────────────────────
@@ -456,10 +552,11 @@ def get_workflow_basic(positive, negative, seed=None):
     }
 
 
-def get_workflow_controlnet(positive, negative, reference_filename, seed=None):
-    """Workflow с ControlNet Canny.
-    Reference картинка → Canny preprocessor → ControlNetApplyAdvanced → KSampler.
-    LoRA остаётся, всё остальное идентично базовому workflow."""
+def get_workflow_controlnet(positive, negative, reference_filename, cn_preset, seed=None):
+    """Workflow с ControlNet Tile.
+    Reference картинка → ImageScale → ControlNetApplyAdvanced → KSampler.
+    LoRA остаётся, всё остальное идентично базовому workflow.
+    v6.6: cn_preset — dict с keys strength/start/end (выбран в build_prompt)."""
     if seed is None:
         seed = int(time.time()) % 1000000000
 
@@ -517,9 +614,9 @@ def get_workflow_controlnet(positive, negative, reference_filename, seed=None):
                 "negative": ["7", 0],
                 "control_net": ["22", 0],
                 "image": ["21", 0],
-                "strength": CONTROLNET_STRENGTH,
-                "start_percent": CONTROLNET_START_PERCENT,
-                "end_percent": CONTROLNET_END_PERCENT
+                "strength": cn_preset["strength"],
+                "start_percent": cn_preset["start"],
+                "end_percent": cn_preset["end"]
             }
         },
 
@@ -598,7 +695,7 @@ def handler(job):
     if not wait_for_comfyui():
         return {"error": "ComfyUI failed to start"}
 
-    positive, negative = build_prompt(job_input)
+    positive, negative, cn_preset = build_prompt(job_input)
 
     # ─── Решаем: используем ControlNet или нет ───
     reference_url = job_input.get("reference_image_url", "").strip() if job_input.get("reference_image_url") else ""
@@ -612,7 +709,7 @@ def handler(job):
         reference_filename = download_reference_image(reference_url)
         if reference_filename:
             use_controlnet = True
-            print(f"=== Using ControlNet (strength={CONTROLNET_STRENGTH}, end={CONTROLNET_END_PERCENT}) ===", flush=True)
+            print(f"=== Using ControlNet (strength={cn_preset['strength']}, end={cn_preset['end']}) ===", flush=True)
         else:
             print("=== Fallback to basic workflow (reference download failed) ===", flush=True)
     else:
@@ -623,7 +720,7 @@ def handler(job):
 
     # ─── Строим workflow ───
     if use_controlnet:
-        workflow = get_workflow_controlnet(positive, negative, reference_filename)
+        workflow = get_workflow_controlnet(positive, negative, reference_filename, cn_preset)
     else:
         workflow = get_workflow_basic(positive, negative)
 
