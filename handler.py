@@ -1,8 +1,12 @@
 """
 VOC Gems RunPod Serverless Handler
-v6.4: усилен металл (веса 1.4-1.5) + anti-металл в негатив (чтобы Tile
-      не перебивал цвет металла). Стили сокращены до 8 рабочих категорий
-      под обновлённый фронт.
+v6.5: фикс перетекания цвета камня в металл (Vivid Pink → Yellow).
+      - METALS: одна фраза с весом 1.3 (было три фразы 1.5+1.4+1.3)
+      - UNUSUAL_COLOR_MARKERS: добавлены vivid/bright/saturated/crimson/
+        raspberry/magenta/rubellite/wine (детектор ловит "Vivid Pink")
+      - Anti-warm-tone в негативе камня при тёплом металле vs прохладном камне
+      - Порядок в позитиве: камень → стиль → металл → ЯКОРЬ цвета камня
+      - Tile поднят: strength=0.4, end_percent=0.5
 """
 
 import runpod
@@ -25,9 +29,9 @@ CHECKPOINT_NAME = "juggernaut_reborn.safetensors"
 # Это означает: цвет камня будет точно с фото, форма даст модели больше свободы,
 # фон/рука/ткань референса будут размыты и не повлияют на финальный фон.
 CONTROLNET_MODEL = "control_v11f1e_sd15_tile.pth"
-CONTROLNET_STRENGTH = 0.3          # снижено: Tile должен подсказать ЦВЕТ, не весь контекст фото
+CONTROLNET_STRENGTH = 0.4          # v6.5: поднято с 0.3, чтобы Tile дольше удерживал ЦВЕТ камня
 CONTROLNET_START_PERCENT = 0.0
-CONTROLNET_END_PERCENT = 0.35      # отпускаем рано: модель свободно делает белый фон и оправу
+CONTROLNET_END_PERCENT = 0.5       # v6.5: поднято с 0.35 — Tile отпускается позже, цвет защищён
 REFERENCE_FILENAME = "vocgems_reference.png"
 
 
@@ -146,10 +150,21 @@ JEWELRY_NEG = {
 }
 
 METALS = {
-    "gold_750":   "(18k yellow gold setting:1.5), (warm yellow gold metal:1.4), (golden metallic finish:1.3)",
-    "white_gold": "(18k white gold setting:1.4), polished white metal, cool silver-tone metal",
-    "rose_gold":  "(18k rose gold setting:1.5), (pink gold metal:1.4), (warm rose-toned metal:1.3)",
-    "platinum":   "(platinum setting:1.4), polished platinum, cool silver-tone metal",
+    # v6.5: ослаблено с 1.5+1.4+1.3 (три фразы) до одной фразы с весом 1.3
+    # Металл не должен перебивать камень — баланс восстановлен в пользу цвета камня (1.5-1.7)
+    "gold_750":   "(18k yellow gold band:1.3), warm gold setting",
+    "white_gold": "(18k white gold band:1.3), polished silver-tone setting",
+    "rose_gold":  "(18k rose gold band:1.3), warm pink gold setting",
+    "platinum":   "(platinum band:1.3), polished cool-tone setting",
+}
+
+# Тон металла: warm = тянет картинку в жёлтый/оранжевый, cool = в серебристый
+# Используется для защиты камня в негативе
+METAL_TONE = {
+    "gold_750":   "warm",
+    "rose_gold":  "warm",
+    "white_gold": "cool",
+    "platinum":   "cool",
 }
 
 # Анти-металл в негатив — чтобы Tile не перебивал цветовую гамму выбранным золотом
@@ -205,11 +220,17 @@ STONE_DEFAULT_COLORS = {
 }
 
 UNUSUAL_COLOR_MARKERS = {
+    # Интенсивность (v6.5: добавлено — чтобы "Vivid Pink" триггерил защиту цвета)
+    "vivid", "bright", "intense", "hot", "saturated", "electric", "neon", "rich",
+    # Светлота / приглушённость
     "pastel", "light", "pale", "soft", "muted",
     "dark", "deep",
+    # Оттенки (расширено v6.5)
     "grey", "gray", "champagne", "peach", "salmon",
     "cognac", "honey", "lavender", "lilac", "mint",
-    "teal", "olive", "neon", "smoky", "smokey",
+    "teal", "olive", "smoky", "smokey",
+    "crimson", "raspberry", "magenta", "fuchsia", "rubellite", "wine",
+    "burgundy", "coral", "apricot", "amber",
 }
 
 
@@ -264,12 +285,17 @@ def build_prompt(params):
     anchor = JEWELRY_ANCHORS.get(jewelry_type, "elegant jewelry")
     weighted_anchor = f"({anchor}:1.4)"
 
-    color_weight = 1.7 if is_unusual_color(stone_color, stone_type) else 1.5
+    unusual = is_unusual_color(stone_color, stone_type)
+    color_weight = 1.7 if unusual else 1.5
+
     if stone_color:
         weighted_color = f"({stone_color}:{color_weight})"
         color_emphasis = f"{weighted_color} {stone_type}, {stone_color} colored gemstone, "
+        # v6.5: ЯКОРЬ цвета камня — повторяем после металла, чтобы металл не перетягивал гамму
+        color_anchor = f", (vivid {stone_color} {stone_type} center stone:1.4)"
     else:
         color_emphasis = f"{stone_type}, "
+        color_anchor = ""
 
     origin_part = f", from {stone_origin}" if stone_origin else ""
     cut_part = f"{stone_cut} cut" if stone_cut else "faceted cut"
@@ -280,11 +306,17 @@ def build_prompt(params):
     diamonds_phrase = ", with small accent diamonds" if with_diamonds else ""
     wishes_phrase = f", {custom_wishes}" if custom_wishes else ""
 
+    # v6.5: новый порядок — камень → стиль/композиция → металл → ЯКОРЬ цвета камня.
+    # Это даёт модели сначала "увидеть" камень, потом стиль, и только в конце уточнить металл.
+    # Якорь цвета после металла блокирует перетекание цвета с золота на камень.
     positive = (
         f"vocgems jewelry, {weighted_anchor}, "
         f"(professional product catalog photography:1.5), "
         f"(commercial jewelry catalog:1.4), "
-        f"{stone_desc}, {metal_phrase}, {style_phrase}{diamonds_phrase}{wishes_phrase}, "
+        f"{stone_desc}, "
+        f"{style_phrase}{diamonds_phrase}{wishes_phrase}, "
+        f"{metal_phrase}"
+        f"{color_anchor}, "
         f"(pure white seamless background:1.6), "
         f"(plain white studio backdrop:1.5), "
         f"professional studio lighting, soft shadows, "
@@ -298,6 +330,24 @@ def build_prompt(params):
     color_neg_part = f"{color_neg}, " if color_neg else ""
     metal_neg = METAL_NEG.get(metal_key, "")
     metal_neg_part = f"{metal_neg}, " if metal_neg else ""
+
+    # v6.5: защита камня от тёплого металла (yellow/rose gold).
+    # Если камень "холодный" (синий/зелёный/розовый/фиолетовый), а металл тёплый —
+    # пишем в негатив, что камень НЕ должен быть жёлтым/золотым.
+    metal_tone = METAL_TONE.get(metal_key, "warm")
+    cold_stone_colors = {"pink", "blue", "green", "violet", "purple", "magenta",
+                         "fuchsia", "lavender", "lilac", "teal", "mint", "raspberry",
+                         "crimson", "rubellite"}
+    stone_is_cold = stone_color and any(c in stone_color.lower() for c in cold_stone_colors)
+    stone_color_anti_metal = ""
+    if metal_tone == "warm" and stone_is_cold:
+        # Камень не должен утечь в жёлтый из-за золота
+        stone_color_anti_metal = (
+            f"(yellow {stone_type}:1.6), (gold colored stone:1.5), "
+            f"(yellow gemstone:1.5), (warm tinted stone:1.4), "
+            f"(metallic colored stone:1.4), "
+        )
+
     negative = (
         f"(woman:1.6), (man:1.6), (person:1.6), (human:1.6), (people:1.6), "
         f"(face:1.6), (portrait:1.6), (model:1.6), "
@@ -308,6 +358,7 @@ def build_prompt(params):
         f"mannequin, doll, statue, "
         f"{type_neg}, "
         f"{color_neg_part}"
+        f"{stone_color_anti_metal}"
         f"{metal_neg_part}"
         f"(flower:1.5), (petals:1.5), (leaves:1.4), (plants:1.4), "
         f"(fabric:1.5), (cloth:1.5), (silk:1.4), (paper:1.4), (textured background:1.4), "
@@ -322,6 +373,7 @@ def build_prompt(params):
     )
 
     print(f"=== PROMPT for {jewelry_type} ({stone_type}) ===", flush=True)
+    print(f"=== unusual_color={unusual}, metal_tone={metal_tone}, stone_is_cold={stone_is_cold} ===", flush=True)
     print(f"POSITIVE: {positive}", flush=True)
     print(f"NEGATIVE: {negative}", flush=True)
 
