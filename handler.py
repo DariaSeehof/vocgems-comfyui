@@ -1,6 +1,8 @@
 """
 VOC Gems RunPod Serverless Handler
-v3: возврат к проверенной 9-апрельской структуре + усиленный негатив с весами
+v6: добавлен ControlNet Canny — генерация с привязкой к реальному фото камня.
+    Если reference_image_url передан и картинка скачалась → используем ControlNet.
+    Если нет → graceful fallback на старый workflow (без ControlNet).
 """
 
 import runpod
@@ -15,10 +17,21 @@ import os
 
 comfyui_process = None
 
+# ─── ControlNet параметры (захардкожены, тюним без передеплоя через правку этих констант) ───
+CONTROLNET_MODEL = "control_v11p_sd15_canny.pth"
+CONTROLNET_STRENGTH = 0.7          # сила влияния контура камня (0.0—1.0)
+CONTROLNET_START_PERCENT = 0.0     # с какого шага включается ControlNet
+CONTROLNET_END_PERCENT = 0.85      # на каком шаге отключается (0.85 = последние 15% без него)
+CANNY_LOW_THRESHOLD = 0.4
+CANNY_HIGH_THRESHOLD = 0.8
+REFERENCE_FILENAME = "vocgems_reference.png"
+
+
 def start_comfyui():
     global comfyui_process
     os.chdir("/workspace/ComfyUI")
 
+    # ─── Симлинк LoRA ───
     lora_src = os.environ.get("LORA_PATH", "/runpod-volume/lora/vocgems_jewelry_v2.safetensors")
     lora_dst = "/workspace/ComfyUI/models/loras/vocgems_jewelry_v2.safetensors"
 
@@ -29,7 +42,7 @@ def start_comfyui():
     elif not os.path.exists(lora_src):
         print(f"WARNING: LoRA not found at {lora_src}", flush=True)
 
-    # Линкуем checkpoint (базовую модель) с Network Volume
+    # ─── Симлинк Checkpoint ───
     ckpt_src = os.environ.get("CKPT_PATH", "/runpod-volume/checkpoints/realisticVisionV60B1_v60B1VAE.safetensors")
     ckpt_dst = "/workspace/ComfyUI/models/checkpoints/realisticVisionV60B1_v60B1VAE.safetensors"
 
@@ -39,6 +52,20 @@ def start_comfyui():
         print(f"Checkpoint linked: {ckpt_src} -> {ckpt_dst}", flush=True)
     elif not os.path.exists(ckpt_src):
         print(f"WARNING: Checkpoint not found at {ckpt_src}", flush=True)
+
+    # ─── Симлинк ControlNet ───
+    cnet_src = os.environ.get("CONTROLNET_PATH", f"/runpod-volume/controlnet/{CONTROLNET_MODEL}")
+    cnet_dst = f"/workspace/ComfyUI/models/controlnet/{CONTROLNET_MODEL}"
+
+    if os.path.exists(cnet_src) and not os.path.exists(cnet_dst):
+        os.makedirs("/workspace/ComfyUI/models/controlnet", exist_ok=True)
+        os.symlink(cnet_src, cnet_dst)
+        print(f"ControlNet linked: {cnet_src} -> {cnet_dst}", flush=True)
+    elif not os.path.exists(cnet_src):
+        print(f"WARNING: ControlNet not found at {cnet_src} — генерация будет без ControlNet", flush=True)
+
+    # ─── Папка input для reference картинок ───
+    os.makedirs("/workspace/ComfyUI/input", exist_ok=True)
 
     print("Launching ComfyUI process...", flush=True)
     comfyui_process = subprocess.Popen(
@@ -71,6 +98,8 @@ def wait_for_comfyui():
     return False
 
 
+# ─── ХЕЛПЕРЫ ДАННЫХ ───────────────────────────────────────────────────────────
+
 def clean_str(value, default=""):
     if not value:
         return default
@@ -94,7 +123,6 @@ def normalize_stone_type(raw):
     return mapping.get(s, s)
 
 
-# Короткие якорные фразы — по 9-апрельской системе. Без художественных подсказок.
 JEWELRY_ANCHORS = {
     "ring":     "elegant ring",
     "earrings": "drop earrings pair",
@@ -139,10 +167,8 @@ STYLE_LEGACY_MAP = {
 }
 
 
-# ─── ЦВЕТОВАЯ ЛОГИКА ─────────────────────────────────────────────────────────
-# Дефолтный цвет, к которому модель тянется по умолчанию для каждого камня.
-# Если просят необычный цвет — добавляем дефолтный в негатив, чтобы модель
-# не сваливалась к привычному.
+# ─── ЦВЕТОВАЯ ЛОГИКА ──────────────────────────────────────────────────────────
+
 STONE_DEFAULT_COLORS = {
     "ruby":        ["red"],
     "emerald":     ["green"],
@@ -161,8 +187,6 @@ STONE_DEFAULT_COLORS = {
     "opal":        ["white"],
 }
 
-# Слова-модификаторы, сигналящие о нестандартном/редком цвете.
-# Если в stone_color встречается хоть одно — цвет получает усиленный вес.
 UNUSUAL_COLOR_MARKERS = {
     "pastel", "light", "pale", "soft", "muted",
     "dark", "deep",
@@ -173,39 +197,32 @@ UNUSUAL_COLOR_MARKERS = {
 
 
 def is_unusual_color(stone_color, stone_type):
-    """True если цвет нестандартный для этого камня — нужен усиленный вес."""
     if not stone_color:
         return False
     color_lower = stone_color.lower()
-    # Любой маркер-модификатор → нестандартный
     for marker in UNUSUAL_COLOR_MARKERS:
         if marker in color_lower:
             return True
-    # Цвет НЕ совпадает с дефолтным для этого камня → нестандартный
     defaults = STONE_DEFAULT_COLORS.get(stone_type, [])
     if defaults:
         for default in defaults:
             if default in color_lower:
                 return False
-        return True  # цвет указан, но не из дефолтного списка
+        return True
     return False
 
 
 def build_color_negative(stone_color, stone_type):
-    """Возвращает строку с дефолтными цветами камня для негатива.
-    Только если цвет нестандартный."""
     if not is_unusual_color(stone_color, stone_type):
         return ""
     defaults = STONE_DEFAULT_COLORS.get(stone_type, [])
     if not defaults:
         return ""
-    # Не запрещаем тот цвет, который сами просим
     color_lower = stone_color.lower() if stone_color else ""
     filtered = [d for d in defaults if d not in color_lower and color_lower not in d]
     if not filtered:
         return ""
     return ", ".join(f"{d} {stone_type}" for d in filtered)
-
 
 
 def build_prompt(params):
@@ -230,13 +247,11 @@ def build_prompt(params):
     anchor = JEWELRY_ANCHORS.get(jewelry_type, "elegant jewelry")
     weighted_anchor = f"({anchor}:1.4)"
 
-    # Цвет: если нестандартный — вес 1.7, иначе 1.5. Плюс дублирование.
     color_weight = 1.7 if is_unusual_color(stone_color, stone_type) else 1.5
     if stone_color:
         weighted_color = f"({stone_color}:{color_weight})"
         color_emphasis = f"{weighted_color} {stone_type}, {stone_color} colored gemstone, "
     else:
-        weighted_color = ""
         color_emphasis = f"{stone_type}, "
 
     origin_part = f", from {stone_origin}" if stone_origin else ""
@@ -248,7 +263,6 @@ def build_prompt(params):
     diamonds_phrase = ", with small accent diamonds" if with_diamonds else ""
     wishes_phrase = f", {custom_wishes}" if custom_wishes else ""
 
-    # ПОЗИТИВ — короткий, по 9-апрельской структуре, цвет упомянут дважды
     positive = (
         f"vocgems jewelry, {weighted_anchor}, "
         f"photorealistic jewelry photography, "
@@ -259,7 +273,6 @@ def build_prompt(params):
         f"single piece centered on white seamless background"
     )
 
-    # НЕГАТИВ — усиленный, с весами на анти-человек термины
     type_neg = JEWELRY_NEG.get(jewelry_type, "")
     color_neg = build_color_negative(stone_color, stone_type)
     color_neg_part = f"{color_neg}, " if color_neg else ""
@@ -286,7 +299,51 @@ def build_prompt(params):
     return positive, negative
 
 
-def get_workflow(positive, negative, seed=None):
+# ─── REFERENCE IMAGE DOWNLOAD ─────────────────────────────────────────────────
+
+def download_reference_image(url, timeout=15):
+    """Скачивает фото камня по URL в /workspace/ComfyUI/input/.
+    Возвращает имя файла (без пути) или None при ошибке."""
+    if not url:
+        return None
+
+    try:
+        print(f"Downloading reference image: {url}", flush=True)
+        req = urllib.request.Request(url, headers={
+            'User-Agent': 'VOCGems-RunPod-Worker/1.0'
+        })
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            data = response.read()
+            content_type = response.headers.get('Content-Type', '').lower()
+
+        if not data or len(data) < 100:
+            print(f"WARNING: reference image too small ({len(data)} bytes)", flush=True)
+            return None
+
+        # Определяем расширение
+        if 'png' in content_type:
+            ext = 'png'
+        elif 'webp' in content_type:
+            ext = 'webp'
+        else:
+            ext = 'jpg'
+
+        filename = f"vocgems_reference.{ext}"
+        path = f"/workspace/ComfyUI/input/{filename}"
+        with open(path, 'wb') as f:
+            f.write(data)
+
+        print(f"Reference image saved: {path} ({len(data)} bytes, {content_type})", flush=True)
+        return filename
+    except Exception as e:
+        print(f"WARNING: failed to download reference image: {e}", flush=True)
+        return None
+
+
+# ─── WORKFLOWS ────────────────────────────────────────────────────────────────
+
+def get_workflow_basic(positive, negative, seed=None):
+    """Старый workflow без ControlNet — fallback."""
     if seed is None:
         seed = int(time.time()) % 1000000000
 
@@ -294,7 +351,7 @@ def get_workflow(positive, negative, seed=None):
         "3": {
             "class_type": "KSampler",
             "inputs": {
-                "cfg": 6,  # снижено с 7 — даёт модели больше свободы следовать промпту
+                "cfg": 6,
                 "denoise": 1,
                 "latent_image": ["5", 0], "model": ["10", 0],
                 "negative": ["7", 0], "positive": ["6", 0],
@@ -317,6 +374,100 @@ def get_workflow(positive, negative, seed=None):
         }
     }
 
+
+def get_workflow_controlnet(positive, negative, reference_filename, seed=None):
+    """Workflow с ControlNet Canny.
+    Reference картинка → Canny preprocessor → ControlNetApplyAdvanced → KSampler.
+    LoRA остаётся, всё остальное идентично базовому workflow."""
+    if seed is None:
+        seed = int(time.time()) % 1000000000
+
+    return {
+        # ─── Базовые ноды (как в basic workflow) ───
+        "4": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": "realisticVisionV60B1_v60B1VAE.safetensors"}
+        },
+        "5": {
+            "class_type": "EmptyLatentImage",
+            "inputs": {"batch_size": 1, "height": 768, "width": 768}
+        },
+        "10": {
+            "class_type": "LoraLoader",
+            "inputs": {
+                "clip": ["4", 1], "lora_name": "vocgems_jewelry_v2.safetensors",
+                "model": ["4", 0], "strength_clip": 0.5, "strength_model": 0.5
+            }
+        },
+        "6": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"clip": ["10", 1], "text": positive}
+        },
+        "7": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"clip": ["10", 1], "text": negative}
+        },
+
+        # ─── ControlNet цепочка ───
+        "20": {
+            "class_type": "LoadImage",
+            "inputs": {"image": reference_filename}
+        },
+        "21": {
+            "class_type": "Canny",
+            "inputs": {
+                "image": ["20", 0],
+                "low_threshold": CANNY_LOW_THRESHOLD,
+                "high_threshold": CANNY_HIGH_THRESHOLD
+            }
+        },
+        "22": {
+            "class_type": "ControlNetLoader",
+            "inputs": {"control_net_name": CONTROLNET_MODEL}
+        },
+        "23": {
+            "class_type": "ControlNetApplyAdvanced",
+            "inputs": {
+                "positive": ["6", 0],
+                "negative": ["7", 0],
+                "control_net": ["22", 0],
+                "image": ["21", 0],
+                "strength": CONTROLNET_STRENGTH,
+                "start_percent": CONTROLNET_START_PERCENT,
+                "end_percent": CONTROLNET_END_PERCENT
+            }
+        },
+
+        # ─── KSampler берёт positive/negative из ControlNetApplyAdvanced ───
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {
+                "cfg": 6,
+                "denoise": 1,
+                "latent_image": ["5", 0],
+                "model": ["10", 0],
+                "positive": ["23", 0],  # ← с ControlNet
+                "negative": ["23", 1],  # ← с ControlNet
+                "sampler_name": "dpmpp_2m",
+                "scheduler": "karras",
+                "seed": seed,
+                "steps": 30
+            }
+        },
+
+        # ─── Output ───
+        "8": {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["3", 0], "vae": ["4", 2]}
+        },
+        "9": {
+            "class_type": "SaveImage",
+            "inputs": {"filename_prefix": "vocgems", "images": ["8", 0]}
+        }
+    }
+
+
+# ─── COMFYUI INTERACTION ──────────────────────────────────────────────────────
 
 def queue_prompt(workflow):
     data = json.dumps({"prompt": workflow}).encode('utf-8')
@@ -353,6 +504,8 @@ def wait_for_completion(prompt_id, timeout=180):
     return None
 
 
+# ─── HANDLER ──────────────────────────────────────────────────────────────────
+
 def handler(job):
     job_input = job.get("input", {})
     print(f"Job received: {job_input}", flush=True)
@@ -361,7 +514,33 @@ def handler(job):
         return {"error": "ComfyUI failed to start"}
 
     positive, negative = build_prompt(job_input)
-    workflow = get_workflow(positive, negative)
+
+    # ─── Решаем: используем ControlNet или нет ───
+    reference_url = job_input.get("reference_image_url", "").strip() if job_input.get("reference_image_url") else ""
+    reference_filename = None
+    use_controlnet = False
+
+    cnet_model_path = f"/workspace/ComfyUI/models/controlnet/{CONTROLNET_MODEL}"
+    cnet_available = os.path.exists(cnet_model_path)
+
+    if reference_url and cnet_available:
+        reference_filename = download_reference_image(reference_url)
+        if reference_filename:
+            use_controlnet = True
+            print(f"=== Using ControlNet (strength={CONTROLNET_STRENGTH}, end={CONTROLNET_END_PERCENT}) ===", flush=True)
+        else:
+            print("=== Fallback to basic workflow (reference download failed) ===", flush=True)
+    else:
+        if not reference_url:
+            print("=== No reference_image_url provided — using basic workflow ===", flush=True)
+        if not cnet_available:
+            print(f"=== ControlNet model missing at {cnet_model_path} — using basic workflow ===", flush=True)
+
+    # ─── Строим workflow ───
+    if use_controlnet:
+        workflow = get_workflow_controlnet(positive, negative, reference_filename)
+    else:
+        workflow = get_workflow_basic(positive, negative)
 
     try:
         result = queue_prompt(workflow)
@@ -372,7 +551,7 @@ def handler(job):
     if not prompt_id:
         return {"error": "Failed to queue prompt"}
 
-    print(f"Prompt queued: {prompt_id}", flush=True)
+    print(f"Prompt queued: {prompt_id} (controlnet={use_controlnet})", flush=True)
     filename = wait_for_completion(prompt_id)
 
     if not filename:
@@ -381,7 +560,12 @@ def handler(job):
     print(f"Generation complete: {filename}", flush=True)
     image_base64 = get_image(filename)
 
-    return {"image": image_base64, "prompt_id": prompt_id, "filename": filename}
+    return {
+        "image": image_base64,
+        "prompt_id": prompt_id,
+        "filename": filename,
+        "controlnet_used": use_controlnet
+    }
 
 
 print("Starting ComfyUI...", flush=True)
