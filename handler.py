@@ -1,8 +1,8 @@
 """
 VOC Gems RunPod Serverless Handler
-v6.3: снижены ControlNet strength (0.3) и end_percent (0.35).
-      Tile теперь только подсказывает ЦВЕТ камня, не тянет контекст фото.
-      Модель свободно генерирует белый фон и оправу по промпту.
+v6.4: усилен металл (веса 1.4-1.5) + anti-металл в негатив (чтобы Tile
+      не перебивал цвет металла). Стили сокращены до 8 рабочих категорий
+      под обновлённый фронт.
 """
 
 import runpod
@@ -146,28 +146,41 @@ JEWELRY_NEG = {
 }
 
 METALS = {
-    "gold_750":   "18k yellow gold setting",
-    "white_gold": "18k white gold setting",
-    "rose_gold":  "18k rose gold setting",
-    "platinum":   "platinum setting",
+    "gold_750":   "(18k yellow gold setting:1.5), (warm yellow gold metal:1.4), (golden metallic finish:1.3)",
+    "white_gold": "(18k white gold setting:1.4), polished white metal, cool silver-tone metal",
+    "rose_gold":  "(18k rose gold setting:1.5), (pink gold metal:1.4), (warm rose-toned metal:1.3)",
+    "platinum":   "(platinum setting:1.4), polished platinum, cool silver-tone metal",
+}
+
+# Анти-металл в негатив — чтобы Tile не перебивал цветовую гамму выбранным золотом
+METAL_NEG = {
+    "gold_750":   "(silver metal:1.5), (white gold:1.5), (platinum:1.4), (rose gold:1.4), cool tone metal",
+    "white_gold": "(yellow gold:1.4), (rose gold:1.4), warm tone metal, golden tint",
+    "rose_gold":  "(yellow gold:1.4), (white gold:1.4), (silver:1.4), (platinum:1.4), cool tone metal",
+    "platinum":   "(yellow gold:1.4), (rose gold:1.4), warm tone metal, golden tint",
 }
 
 STYLES = {
-    "classic":   "classic timeless design",
-    "modern":    "modern minimalist design",
-    "vintage":   "vintage art deco design",
-    "statement": "halo setting with diamond accents",
+    "classic":    "(classic timeless design:1.3), elegant traditional style",
+    "modern":     "(modern minimalist design:1.3), clean lines, contemporary",
+    "vintage":    "(vintage art deco design:1.3), geometric patterns, 1920s aesthetic",
+    "halo":       "(halo setting:1.4), diamond halo around center stone, pavé accents",
+    "solitaire":  "(solitaire ring:1.4), single center stone, classic prong setting, minimalist",
+    "statement":  "(bold statement design:1.4), large dramatic piece, high jewelry style",
+    "nature":     "(nature inspired design:1.3), organic flowing forms, leaf and vine motifs",
+    "geometric":  "(geometric design:1.3), sharp angular forms, architectural lines",
 }
 
 STYLE_LEGACY_MAP = {
+    # старые ключи если придут со старого фронта
     "minimalist":  "modern",
     "futuristic":  "modern",
-    "geometric":   "modern",
     "artdeco":     "vintage",
-    "artnouveau":  "vintage",
+    "artnouveau":  "nature",
     "victorian":   "vintage",
-    "halo":        "statement",
     "highjewelry": "statement",
+    "pave":        "halo",
+    "floral":      "nature",
 }
 
 
@@ -283,6 +296,8 @@ def build_prompt(params):
     type_neg = JEWELRY_NEG.get(jewelry_type, "")
     color_neg = build_color_negative(stone_color, stone_type)
     color_neg_part = f"{color_neg}, " if color_neg else ""
+    metal_neg = METAL_NEG.get(metal_key, "")
+    metal_neg_part = f"{metal_neg}, " if metal_neg else ""
     negative = (
         f"(woman:1.6), (man:1.6), (person:1.6), (human:1.6), (people:1.6), "
         f"(face:1.6), (portrait:1.6), (model:1.6), "
@@ -293,6 +308,7 @@ def build_prompt(params):
         f"mannequin, doll, statue, "
         f"{type_neg}, "
         f"{color_neg_part}"
+        f"{metal_neg_part}"
         f"(flower:1.5), (petals:1.5), (leaves:1.4), (plants:1.4), "
         f"(fabric:1.5), (cloth:1.5), (silk:1.4), (paper:1.4), (textured background:1.4), "
         f"(colored background:1.5), (pastel background:1.5), (artistic background:1.5), "
