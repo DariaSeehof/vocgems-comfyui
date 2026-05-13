@@ -1,8 +1,8 @@
 """
 VOC Gems RunPod Serverless Handler
-v6.2: Juggernaut Reborn (product-photography checkpoint) + ControlNet Tile.
-      Tile передаёт цвет камня с референса, не контуры.
-      Juggernaut архитектурно склонен к чистому белому фону.
+v6.3: снижены ControlNet strength (0.3) и end_percent (0.35).
+      Tile теперь только подсказывает ЦВЕТ камня, не тянет контекст фото.
+      Модель свободно генерирует белый фон и оправу по промпту.
 """
 
 import runpod
@@ -25,9 +25,9 @@ CHECKPOINT_NAME = "juggernaut_reborn.safetensors"
 # Это означает: цвет камня будет точно с фото, форма даст модели больше свободы,
 # фон/рука/ткань референса будут размыты и не повлияют на финальный фон.
 CONTROLNET_MODEL = "control_v11f1e_sd15_tile.pth"
-CONTROLNET_STRENGTH = 0.55         # Tile нужна чуть бОльшая сила чем Canny
+CONTROLNET_STRENGTH = 0.3          # снижено: Tile должен подсказать ЦВЕТ, не весь контекст фото
 CONTROLNET_START_PERCENT = 0.0
-CONTROLNET_END_PERCENT = 0.5       # отпускаем контроль на половине, оправа и фон финализируются свободно
+CONTROLNET_END_PERCENT = 0.35      # отпускаем рано: модель свободно делает белый фон и оправу
 REFERENCE_FILENAME = "vocgems_reference.png"
 
 
