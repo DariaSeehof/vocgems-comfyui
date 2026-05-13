@@ -1,8 +1,8 @@
 """
 VOC Gems RunPod Serverless Handler
-v6: добавлен ControlNet Canny — генерация с привязкой к реальному фото камня.
-    Если reference_image_url передан и картинка скачалась → используем ControlNet.
-    Если нет → graceful fallback на старый workflow (без ControlNet).
+v6.1: усиленный негатив (руки/цветы/ткань), поднятые Canny thresholds,
+      снижен ControlNet strength и end_percent — Canny ловит только контур камня,
+      модель свободна в дизайне оправы и обязана делать белый фон.
 """
 
 import runpod
@@ -19,11 +19,11 @@ comfyui_process = None
 
 # ─── ControlNet параметры (захардкожены, тюним без передеплоя через правку этих констант) ───
 CONTROLNET_MODEL = "control_v11p_sd15_canny.pth"
-CONTROLNET_STRENGTH = 0.7          # сила влияния контура камня (0.0—1.0)
-CONTROLNET_START_PERCENT = 0.0     # с какого шага включается ControlNet
-CONTROLNET_END_PERCENT = 0.85      # на каком шаге отключается (0.85 = последние 15% без него)
-CANNY_LOW_THRESHOLD = 0.4
-CANNY_HIGH_THRESHOLD = 0.8
+CONTROLNET_STRENGTH = 0.45         # снижено: камень узнаваемый, но модель свободна в дизайне
+CONTROLNET_START_PERCENT = 0.0
+CONTROLNET_END_PERCENT = 0.55      # отпускаем контроль на 55% генерации — оправа и фон финализируются без него
+CANNY_LOW_THRESHOLD = 0.75         # высокий порог: ловим только сильные контуры (грани камня)
+CANNY_HIGH_THRESHOLD = 0.95        # игнорируем слабые линии: руки, ткань, складки бумаги
 REFERENCE_FILENAME = "vocgems_reference.png"
 
 
@@ -265,12 +265,15 @@ def build_prompt(params):
 
     positive = (
         f"vocgems jewelry, {weighted_anchor}, "
-        f"photorealistic jewelry photography, "
+        f"(professional product catalog photography:1.5), "
+        f"(commercial jewelry catalog:1.4), "
         f"{stone_desc}, {metal_phrase}, {style_phrase}{diamonds_phrase}{wishes_phrase}, "
-        f"pure white background, studio lighting, "
+        f"(pure white seamless background:1.6), "
+        f"(plain white studio backdrop:1.5), "
+        f"professional studio lighting, soft shadows, "
         f"8k resolution, sharp focus, "
-        f"(isolated product shot:1.3), (no people:1.5), product only, "
-        f"single piece centered on white seamless background"
+        f"(isolated product shot:1.4), (no people:1.6), product only, "
+        f"single piece centered, jewelry store catalog aesthetic"
     )
 
     type_neg = JEWELRY_NEG.get(jewelry_type, "")
@@ -279,17 +282,23 @@ def build_prompt(params):
     negative = (
         f"(woman:1.6), (man:1.6), (person:1.6), (human:1.6), (people:1.6), "
         f"(face:1.6), (portrait:1.6), (model:1.6), "
-        f"(hand:1.4), (hands:1.4), (fingers:1.4), (skin:1.4), (body:1.4), "
+        f"(hand:1.7), (hands:1.7), (fingers:1.7), (holding:1.6), "
+        f"(skin:1.5), (body:1.4), (palm:1.5), (fingernail:1.5), (nail:1.4), "
         f"(wearing:1.5), (neck:1.4), (ear:1.4), (wrist:1.4), (arm:1.4), "
         f"earlobe, eye, eyes, hair, lips, mouth, nose, "
         f"mannequin, doll, statue, "
         f"{type_neg}, "
         f"{color_neg_part}"
+        f"(flower:1.5), (petals:1.5), (leaves:1.4), (plants:1.4), "
+        f"(fabric:1.5), (cloth:1.5), (silk:1.4), (paper:1.4), (textured background:1.4), "
+        f"(colored background:1.5), (pastel background:1.5), (artistic background:1.5), "
+        f"(creative composition:1.4), (lifestyle setting:1.4), "
         f"cartoon, illustration, painting, sketch, anime, 3d render, CGI, "
-        f"blurry, low quality, deformed, floating stones, "
+        f"blurry, soft focus, low quality, deformed, floating stones, "
         f"watermark, text, logo, "
         f"vogue magazine, fashion photography, lifestyle photography, editorial, "
-        f"jewelry on model, jewelry being worn"
+        f"jewelry on model, jewelry being worn, jewelry being held, "
+        f"two stones, multiple gems, pearl, pearls, sphere, beads"
     )
 
     print(f"=== PROMPT for {jewelry_type} ({stone_type}) ===", flush=True)
