@@ -1,19 +1,25 @@
 """
 VOC Gems RunPod Serverless Handler
-v6.6.2: фикс рубина (Red → тёмный бордовый) + фантом второго камня.
-        - "red" добавлен в cold_stone_colors (для ювелирки красный надо
-          защищать от перетекания в тёплое золото)
-        - UNUSUAL_COLOR_MARKERS: + "pure", "true", "blood", "pigeon"
-          (ярко-красные рубины должны триггерить unusual 1.7)
-        - "single piece centered" → "(single centered gemstone:1.5)" с весом,
-          плюс "extra gem floating, stone above main" в негатив
-          (попытка убрать фантом второго камня в верхней половине)
+v6.7: STABLE BASELINE. Откат на v6.4 + одна минимальная правка.
+      Цель — стабильно работающий конструктор для ярких цветных камней.
+      Бледные/прозрачные камни обрабатываются отдельным workflow (v6.8+).
 
-v6.6.1: фикс "камень-постамент" — танзанит был на широком золотом основании,
-        а не в кольце.
+Изменения от v6.4:
+  - METALS: одна фраза с весом 1.3 (было три фразы 1.5+1.4+1.3).
+    Это убирает "малиновый камень → жёлтый" проблему.
 
-v6.6: поддержка бледных/прозрачных камней (Moonstone, Opal, Pearl, Diamond,
-      Pastel/Light/Milky-цвета).
+Что НЕ делаем в v6.7 (вынесено в roadmap):
+  - Anti-warm-tone защита (v6.5) — давала ложные срабатывания
+  - STONE_DESCRIPTORS / спец-якоря (v6.6) — давали "камень на постаменте"
+  - WEAK_VISUAL_STONES пресеты Tile (v6.6) — для прозрачных камней
+    отдельный pipeline в v6.8
+  - Дубль якоря изделия (v6.6.1) — баланс не настроен под все случаи
+  - Anti-floating-gem (v6.6.2) — фантомы — артефакт денойза, лечим иначе
+
+Baseline для ярких цветных камней:
+  ruby, emerald, sapphire (вкл. royal blue), tourmaline (вкл. rubellite),
+  spinel (vivid colors), garnet (вкл. spessartite), tanzanite, amethyst,
+  morganite, alexandrite.
 """
 
 import runpod
@@ -33,16 +39,12 @@ CHECKPOINT_NAME = "juggernaut_reborn.safetensors"
 
 # ─── ControlNet параметры ───
 # Tile передаёт ЦВЕТ и общую структуру референса, а не контуры.
-# v6.6: три пресета силы. Strong для ярких/чётких камней, weak для прозрачных
-# (чтобы Tile не тащил белый фон референса в композицию).
+# Это означает: цвет камня будет точно с фото, форма даст модели больше свободы,
+# фон/рука/ткань референса будут размыты и не повлияют на финальный фон.
 CONTROLNET_MODEL = "control_v11f1e_sd15_tile.pth"
-
-CONTROLNET_PRESETS = {
-    "strong": {"strength": 0.4, "start": 0.0, "end": 0.5},   # яркие камни (рубеллит, изумруд)
-    "medium": {"strength": 0.3, "start": 0.0, "end": 0.4},   # бледные цветные (Pastel Pink спинель)
-    "weak":   {"strength": 0.2, "start": 0.0, "end": 0.3},   # прозрачные (лунный камень, опал, бриллиант)
-}
-CONTROLNET_DEFAULT_PRESET = "strong"
+CONTROLNET_STRENGTH = 0.3          # снижено: Tile должен подсказать ЦВЕТ, не весь контекст фото
+CONTROLNET_START_PERCENT = 0.0
+CONTROLNET_END_PERCENT = 0.35      # отпускаем рано: модель свободно делает белый фон и оправу
 REFERENCE_FILENAME = "vocgems_reference.png"
 
 
@@ -161,21 +163,12 @@ JEWELRY_NEG = {
 }
 
 METALS = {
-    # v6.5: ослаблено с 1.5+1.4+1.3 (три фразы) до одной фразы с весом 1.3
-    # Металл не должен перебивать камень — баланс восстановлен в пользу цвета камня (1.5-1.7)
+    # v6.7: одна фраза вес 1.3 (было: три фразы 1.5/1.4/1.3).
+    # Металл больше не доминирует над камнем — цвет камня держится.
     "gold_750":   "(18k yellow gold band:1.3), warm gold setting",
     "white_gold": "(18k white gold band:1.3), polished silver-tone setting",
     "rose_gold":  "(18k rose gold band:1.3), warm pink gold setting",
     "platinum":   "(platinum band:1.3), polished cool-tone setting",
-}
-
-# Тон металла: warm = тянет картинку в жёлтый/оранжевый, cool = в серебристый
-# Используется для защиты камня в негативе
-METAL_TONE = {
-    "gold_750":   "warm",
-    "rose_gold":  "warm",
-    "white_gold": "cool",
-    "platinum":   "cool",
 }
 
 # Анти-металл в негатив — чтобы Tile не перебивал цветовую гамму выбранным золотом
@@ -231,82 +224,12 @@ STONE_DEFAULT_COLORS = {
 }
 
 UNUSUAL_COLOR_MARKERS = {
-    # Интенсивность (v6.5: добавлено — чтобы "Vivid Pink" триггерил защиту цвета)
-    "vivid", "bright", "intense", "hot", "saturated", "electric", "neon", "rich",
-    # v6.6.2: + чистота/насыщенность для рубинов и сапфиров
-    "pure", "true", "blood", "pigeon", "royal",
-    # Светлота / приглушённость
     "pastel", "light", "pale", "soft", "muted",
     "dark", "deep",
-    # Оттенки (расширено v6.5)
     "grey", "gray", "champagne", "peach", "salmon",
     "cognac", "honey", "lavender", "lilac", "mint",
-    "teal", "olive", "smoky", "smokey",
-    "crimson", "raspberry", "magenta", "fuchsia", "rubellite", "wine",
-    "burgundy", "coral", "apricot", "amber",
+    "teal", "olive", "neon", "smoky", "smokey",
 }
-
-# v6.6: камни со слабым цветовым сигналом на фото (прозрачные, молочные, перламутровые).
-# Для них Tile НЕ должен тащить контекст референса — иначе камень исчезает,
-# а в кадр приходит белая замша/палец/коробка с реф-фото.
-WEAK_VISUAL_STONES = {
-    "moonstone", "opal", "pearl", "diamond",
-}
-
-# v6.6: маркеры бледных цветов — для них Tile среднего уровня
-# (камень есть, но цветовой сигнал на референсе слабый)
-PALE_COLOR_MARKERS = {
-    "pastel", "light", "pale", "soft", "milky", "dusty", "powder", "baby",
-}
-
-# v6.6: специфичные дескрипторы по типу камня. Используются как якорь в позитиве
-# ВМЕСТО универсального `vivid {color} {stone} center stone`. Для камней которых
-# нет в этом словаре — fallback на универсальный якорь.
-STONE_DESCRIPTORS = {
-    # v6.6.1: веса снижены с 1.5/1.4 до 1.3/1.2 — иначе модель воспринимает камень
-    # как главный субъект и делает украшение постаментом под него.
-    "moonstone":  "(adularescent moonstone:1.3), (milky white cabochon with blue sheen:1.2), translucent gem",
-    "opal":       "(opalescent gemstone:1.3), (rainbow play of color:1.2), iridescent",
-    "pearl":      "(lustrous pearl:1.3), (iridescent pearl surface:1.2), nacre shimmer",
-    "diamond":    "(brilliant cut diamond:1.3), (fire and scintillation:1.2), colorless transparent gemstone",
-    "tanzanite":  "(tanzanite gemstone:1.3), (violet-blue dichroic:1.2)",
-    "alexandrite":"(alexandrite gemstone:1.3), (color-changing green-purple:1.2)",
-}
-
-# v6.6: камни которые в реальном каталоге почти всегда кабошоны.
-# Если фронт прислал stone_cut типа "Cushion" для лунного камня — игнорируем,
-# ставим cabochon. Сохраняем "огранка" как opt-out: если в stone_cut есть слова
-# "faceted/round/oval/cushion/emerald/marquise" И это лунный камень — оставляем
-# как есть (значит редкий фасетированный экземпляр).
-CABOCHON_DEFAULT_STONES = {
-    "moonstone", "opal", "pearl",
-}
-
-
-def get_controlnet_preset(stone_type, stone_color):
-    """Выбирает пресет силы ControlNet по типу камня и цвету.
-    weak — прозрачные/молочные камни (moonstone, opal, pearl, diamond)
-    medium — камни с бледным цветом (Pastel Pink spinel)
-    strong — всё остальное (яркие цветные камни)"""
-    if stone_type in WEAK_VISUAL_STONES:
-        return "weak"
-    if stone_color:
-        color_lower = stone_color.lower()
-        for marker in PALE_COLOR_MARKERS:
-            if marker in color_lower:
-                return "medium"
-    return "strong"
-
-
-def build_stone_descriptor(stone_type, stone_color):
-    """Возвращает якорь-описание камня для позитива (вставляется после металла).
-    Специфичный по типу если есть в STONE_DESCRIPTORS, иначе универсальный по цвету."""
-    if stone_type in STONE_DESCRIPTORS:
-        return STONE_DESCRIPTORS[stone_type]
-    if stone_color:
-        # v6.6.1: вес снижен с 1.4 до 1.3 — якорь не должен затмевать "ring/earrings/pendant"
-        return f"(vivid {stone_color} {stone_type} center stone:1.3)"
-    return ""
 
 
 def is_unusual_color(stone_color, stone_type):
@@ -358,30 +281,17 @@ def build_prompt(params):
         style_key = STYLE_LEGACY_MAP[style_key]
 
     anchor = JEWELRY_ANCHORS.get(jewelry_type, "elegant jewelry")
-    # v6.6.1: вес поднят с 1.4 до 1.6 — тип изделия (кольцо/серьги/подвеска) должен
-    # доминировать над дескриптором камня, иначе модель делает камень на постаменте.
-    weighted_anchor = f"({anchor}:1.6)"
+    weighted_anchor = f"({anchor}:1.4)"
 
-    unusual = is_unusual_color(stone_color, stone_type)
-    color_weight = 1.7 if unusual else 1.5
-
+    color_weight = 1.7 if is_unusual_color(stone_color, stone_type) else 1.5
     if stone_color:
         weighted_color = f"({stone_color}:{color_weight})"
         color_emphasis = f"{weighted_color} {stone_type}, {stone_color} colored gemstone, "
     else:
         color_emphasis = f"{stone_type}, "
 
-    # v6.6: для лунного камня/опала/жемчуга принудительно cabochon
-    # (фронт может прислать "Cushion" из WDK — но это почти всегда ошибка
-    # для этих типов; реальный каталог = выпуклый кабошон).
-    if stone_type in CABOCHON_DEFAULT_STONES:
-        cut_part = "(cabochon:1.4)"
-    elif stone_cut:
-        cut_part = f"{stone_cut} cut"
-    else:
-        cut_part = "faceted cut"
-
     origin_part = f", from {stone_origin}" if stone_origin else ""
+    cut_part = f"{stone_cut} cut" if stone_cut else "faceted cut"
     stone_desc = f"{color_emphasis}{stone_carat} carat, {cut_part}{origin_part}"
 
     metal_phrase = METALS.get(metal_key, METALS["gold_750"])
@@ -389,36 +299,17 @@ def build_prompt(params):
     diamonds_phrase = ", with small accent diamonds" if with_diamonds else ""
     wishes_phrase = f", {custom_wishes}" if custom_wishes else ""
 
-    # v6.6: якорь — специфичный по типу камня если есть в STONE_DESCRIPTORS,
-    # иначе универсальный по цвету (как в v6.5)
-    stone_descriptor = build_stone_descriptor(stone_type, stone_color)
-    descriptor_part = f", {stone_descriptor}" if stone_descriptor else ""
-
-    # v6.6: выбор пресета силы ControlNet
-    cn_preset_name = get_controlnet_preset(stone_type, stone_color)
-    cn_preset = CONTROLNET_PRESETS[cn_preset_name]
-
-    # v6.5: новый порядок — камень → стиль/композиция → металл → ЯКОРЬ цвета камня.
-    # Это даёт модели сначала "увидеть" камень, потом стиль, и только в конце уточнить металл.
-    # Якорь цвета после металла блокирует перетекание цвета с золота на камень.
-    # v6.6.1: + ПОВТОРНЫЙ якорь типа изделия в конце с весом 1.5 — модель не должна
-    # забывать что финальный кадр это украшение (кольцо/серьги/подвеска), а не камень.
     positive = (
         f"vocgems jewelry, {weighted_anchor}, "
         f"(professional product catalog photography:1.5), "
         f"(commercial jewelry catalog:1.4), "
-        f"{stone_desc}, "
-        f"{style_phrase}{diamonds_phrase}{wishes_phrase}, "
-        f"{metal_phrase}"
-        f"{descriptor_part}, "
-        f"({anchor}:1.5), "
+        f"{stone_desc}, {metal_phrase}, {style_phrase}{diamonds_phrase}{wishes_phrase}, "
         f"(pure white seamless background:1.6), "
         f"(plain white studio backdrop:1.5), "
         f"professional studio lighting, soft shadows, "
         f"8k resolution, sharp focus, "
         f"(isolated product shot:1.4), (no people:1.6), product only, "
-        f"(single centered gemstone:1.5), (one stone only:1.4), "
-        f"jewelry store catalog aesthetic"
+        f"single piece centered, jewelry store catalog aesthetic"
     )
 
     type_neg = JEWELRY_NEG.get(jewelry_type, "")
@@ -426,35 +317,6 @@ def build_prompt(params):
     color_neg_part = f"{color_neg}, " if color_neg else ""
     metal_neg = METAL_NEG.get(metal_key, "")
     metal_neg_part = f"{metal_neg}, " if metal_neg else ""
-
-    # v6.5/v6.6: защита камня от тёплого металла.
-    # v6.5: только cold-coloured камни при warm-металле, вес 1.6
-    # v6.6: + прозрачные камни (weak_visual) при warm-металле, вес 1.4 (мягче,
-    # чтобы не сделать камень совсем бесцветным и не убрать золотые рефлексы)
-    metal_tone = METAL_TONE.get(metal_key, "warm")
-    # v6.6.2: добавлен "red" — для ювелирки красный (рубин, шпинель красная) надо
-    # защищать от перетекания в тёплое золото, иначе камень становится бордовым/винным.
-    cold_stone_colors = {"pink", "red", "blue", "green", "violet", "purple", "magenta",
-                         "fuchsia", "lavender", "lilac", "teal", "mint", "raspberry",
-                         "crimson", "rubellite"}
-    stone_is_cold = stone_color and any(c in stone_color.lower() for c in cold_stone_colors)
-    stone_is_transparent = stone_type in WEAK_VISUAL_STONES
-
-    stone_color_anti_metal = ""
-    if metal_tone == "warm" and stone_is_cold:
-        stone_color_anti_metal = (
-            f"(yellow {stone_type}:1.6), (gold colored stone:1.5), "
-            f"(yellow gemstone:1.5), (warm tinted stone:1.4), "
-            f"(metallic colored stone:1.4), "
-        )
-    elif metal_tone == "warm" and stone_is_transparent:
-        # Прозрачный камень не должен пожелтеть от рефлексов золота, но не давим
-        # слишком сильно — рефлексы должны остаться
-        stone_color_anti_metal = (
-            f"(yellow {stone_type}:1.4), (gold colored {stone_type}:1.3), "
-            f"(opaque yellow stone:1.3), "
-        )
-
     negative = (
         f"(woman:1.6), (man:1.6), (person:1.6), (human:1.6), (people:1.6), "
         f"(face:1.6), (portrait:1.6), (model:1.6), "
@@ -465,37 +327,24 @@ def build_prompt(params):
         f"mannequin, doll, statue, "
         f"{type_neg}, "
         f"{color_neg_part}"
-        f"{stone_color_anti_metal}"
         f"{metal_neg_part}"
         f"(flower:1.5), (petals:1.5), (leaves:1.4), (plants:1.4), "
         f"(fabric:1.5), (cloth:1.5), (silk:1.4), (paper:1.4), (textured background:1.4), "
         f"(colored background:1.5), (pastel background:1.5), (artistic background:1.5), "
         f"(creative composition:1.4), (lifestyle setting:1.4), "
         f"cartoon, illustration, painting, sketch, anime, 3d render, CGI, "
-        f"blurry, soft focus, low quality, deformed, "
-        f"(floating stones:1.5), (extra gem floating:1.5), "
-        f"(stone above main:1.5), (gemstone in upper area:1.4), "
-        f"(second gem:1.4), (additional stone:1.4), "
+        f"blurry, soft focus, low quality, deformed, floating stones, "
         f"watermark, text, logo, "
         f"vogue magazine, fashion photography, lifestyle photography, editorial, "
         f"jewelry on model, jewelry being worn, jewelry being held, "
         f"two stones, multiple gems, pearl, pearls, sphere, beads"
     )
 
-    # v6.6: лунный/опал/жемчуг — НЕ должны попадать в "pearl, pearls, sphere, beads"
-    # в негативе, иначе модель будет избегать сферической/перламутровой формы
-    if stone_type in {"moonstone", "opal", "pearl"}:
-        negative = negative.replace(", pearl, pearls, sphere, beads", "")
-
     print(f"=== PROMPT for {jewelry_type} ({stone_type}) ===", flush=True)
-    print(f"=== unusual_color={unusual}, metal_tone={metal_tone}, "
-          f"stone_is_cold={stone_is_cold}, stone_is_transparent={stone_is_transparent}, "
-          f"cn_preset={cn_preset_name} (strength={cn_preset['strength']}, end={cn_preset['end']}) ===",
-          flush=True)
     print(f"POSITIVE: {positive}", flush=True)
     print(f"NEGATIVE: {negative}", flush=True)
 
-    return positive, negative, cn_preset
+    return positive, negative
 
 
 # ─── REFERENCE IMAGE DOWNLOAD ─────────────────────────────────────────────────
@@ -574,11 +423,10 @@ def get_workflow_basic(positive, negative, seed=None):
     }
 
 
-def get_workflow_controlnet(positive, negative, reference_filename, cn_preset, seed=None):
-    """Workflow с ControlNet Tile.
-    Reference картинка → ImageScale → ControlNetApplyAdvanced → KSampler.
-    LoRA остаётся, всё остальное идентично базовому workflow.
-    v6.6: cn_preset — dict с keys strength/start/end (выбран в build_prompt)."""
+def get_workflow_controlnet(positive, negative, reference_filename, seed=None):
+    """Workflow с ControlNet Canny.
+    Reference картинка → Canny preprocessor → ControlNetApplyAdvanced → KSampler.
+    LoRA остаётся, всё остальное идентично базовому workflow."""
     if seed is None:
         seed = int(time.time()) % 1000000000
 
@@ -636,9 +484,9 @@ def get_workflow_controlnet(positive, negative, reference_filename, cn_preset, s
                 "negative": ["7", 0],
                 "control_net": ["22", 0],
                 "image": ["21", 0],
-                "strength": cn_preset["strength"],
-                "start_percent": cn_preset["start"],
-                "end_percent": cn_preset["end"]
+                "strength": CONTROLNET_STRENGTH,
+                "start_percent": CONTROLNET_START_PERCENT,
+                "end_percent": CONTROLNET_END_PERCENT
             }
         },
 
@@ -717,7 +565,7 @@ def handler(job):
     if not wait_for_comfyui():
         return {"error": "ComfyUI failed to start"}
 
-    positive, negative, cn_preset = build_prompt(job_input)
+    positive, negative = build_prompt(job_input)
 
     # ─── Решаем: используем ControlNet или нет ───
     reference_url = job_input.get("reference_image_url", "").strip() if job_input.get("reference_image_url") else ""
@@ -731,7 +579,7 @@ def handler(job):
         reference_filename = download_reference_image(reference_url)
         if reference_filename:
             use_controlnet = True
-            print(f"=== Using ControlNet (strength={cn_preset['strength']}, end={cn_preset['end']}) ===", flush=True)
+            print(f"=== Using ControlNet (strength={CONTROLNET_STRENGTH}, end={CONTROLNET_END_PERCENT}) ===", flush=True)
         else:
             print("=== Fallback to basic workflow (reference download failed) ===", flush=True)
     else:
@@ -742,7 +590,7 @@ def handler(job):
 
     # ─── Строим workflow ───
     if use_controlnet:
-        workflow = get_workflow_controlnet(positive, negative, reference_filename, cn_preset)
+        workflow = get_workflow_controlnet(positive, negative, reference_filename)
     else:
         workflow = get_workflow_basic(positive, negative)
 
