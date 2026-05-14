@@ -1,5 +1,14 @@
 """
 VOC Gems RunPod Serverless Handler
+v6.6.1: фикс "камень-постамент" — танзанит был на широком золотом основании,
+        а не в кольце. Причина: спец-дескриптор камня (вес 1.5) перевешивал
+        якорь типа изделия (вес 1.4) и шёл в конце позитива → модель делала
+        камень главным субъектом.
+        - JEWELRY_ANCHORS weight: 1.4 → 1.6
+        - STONE_DESCRIPTORS weights: 1.5/1.4 → 1.3/1.2
+        - Universal stone anchor weight: 1.4 → 1.3
+        - Дубль якоря типа изделия (1.5) в конце позитива — финальное напоминание
+
 v6.6: поддержка бледных/прозрачных камней (Moonstone, Opal, Pearl, Diamond,
       Pastel/Light/Milky-цвета).
       - WEAK_VISUAL_STONES: камни с слабым цветовым сигналом → Tile понижен
@@ -255,12 +264,14 @@ PALE_COLOR_MARKERS = {
 # ВМЕСТО универсального `vivid {color} {stone} center stone`. Для камней которых
 # нет в этом словаре — fallback на универсальный якорь.
 STONE_DESCRIPTORS = {
-    "moonstone":  "(adularescent moonstone:1.5), (milky white cabochon with blue sheen:1.4), translucent gem",
-    "opal":       "(opalescent gemstone:1.5), (rainbow play of color:1.4), (iridescent:1.3)",
-    "pearl":      "(lustrous pearl:1.5), (iridescent pearl surface:1.4), nacre shimmer",
-    "diamond":    "(brilliant cut diamond:1.5), (fire and scintillation:1.4), colorless transparent gemstone",
-    "tanzanite":  "(tanzanite gemstone:1.5), (violet-blue dichroic:1.4)",
-    "alexandrite":"(alexandrite gemstone:1.5), (color-changing green-purple:1.4)",
+    # v6.6.1: веса снижены с 1.5/1.4 до 1.3/1.2 — иначе модель воспринимает камень
+    # как главный субъект и делает украшение постаментом под него.
+    "moonstone":  "(adularescent moonstone:1.3), (milky white cabochon with blue sheen:1.2), translucent gem",
+    "opal":       "(opalescent gemstone:1.3), (rainbow play of color:1.2), iridescent",
+    "pearl":      "(lustrous pearl:1.3), (iridescent pearl surface:1.2), nacre shimmer",
+    "diamond":    "(brilliant cut diamond:1.3), (fire and scintillation:1.2), colorless transparent gemstone",
+    "tanzanite":  "(tanzanite gemstone:1.3), (violet-blue dichroic:1.2)",
+    "alexandrite":"(alexandrite gemstone:1.3), (color-changing green-purple:1.2)",
 }
 
 # v6.6: камни которые в реальном каталоге почти всегда кабошоны.
@@ -294,7 +305,8 @@ def build_stone_descriptor(stone_type, stone_color):
     if stone_type in STONE_DESCRIPTORS:
         return STONE_DESCRIPTORS[stone_type]
     if stone_color:
-        return f"(vivid {stone_color} {stone_type} center stone:1.4)"
+        # v6.6.1: вес снижен с 1.4 до 1.3 — якорь не должен затмевать "ring/earrings/pendant"
+        return f"(vivid {stone_color} {stone_type} center stone:1.3)"
     return ""
 
 
@@ -347,7 +359,9 @@ def build_prompt(params):
         style_key = STYLE_LEGACY_MAP[style_key]
 
     anchor = JEWELRY_ANCHORS.get(jewelry_type, "elegant jewelry")
-    weighted_anchor = f"({anchor}:1.4)"
+    # v6.6.1: вес поднят с 1.4 до 1.6 — тип изделия (кольцо/серьги/подвеска) должен
+    # доминировать над дескриптором камня, иначе модель делает камень на постаменте.
+    weighted_anchor = f"({anchor}:1.6)"
 
     unusual = is_unusual_color(stone_color, stone_type)
     color_weight = 1.7 if unusual else 1.5
@@ -388,6 +402,8 @@ def build_prompt(params):
     # v6.5: новый порядок — камень → стиль/композиция → металл → ЯКОРЬ цвета камня.
     # Это даёт модели сначала "увидеть" камень, потом стиль, и только в конце уточнить металл.
     # Якорь цвета после металла блокирует перетекание цвета с золота на камень.
+    # v6.6.1: + ПОВТОРНЫЙ якорь типа изделия в конце с весом 1.5 — модель не должна
+    # забывать что финальный кадр это украшение (кольцо/серьги/подвеска), а не камень.
     positive = (
         f"vocgems jewelry, {weighted_anchor}, "
         f"(professional product catalog photography:1.5), "
@@ -396,6 +412,7 @@ def build_prompt(params):
         f"{style_phrase}{diamonds_phrase}{wishes_phrase}, "
         f"{metal_phrase}"
         f"{descriptor_part}, "
+        f"({anchor}:1.5), "
         f"(pure white seamless background:1.6), "
         f"(plain white studio backdrop:1.5), "
         f"professional studio lighting, soft shadows, "
