@@ -1,17 +1,21 @@
 """
 VOC Gems RunPod Serverless Handler
-v6.7.1: STABLE BASELINE. Откат на v6.4 + две минимальные правки.
-        Цель — стабильно работающий конструктор для ярких цветных камней.
-        Бледные/прозрачные камни обрабатываются отдельным workflow (v6.8+).
+v6.7.2: STABLE BASELINE v6.7.1 + две точечные правки под кейсы из тестов 14.05.
 
-Изменения от v6.4:
+Изменения от v6.7.1:
+  3. BI-COLOR детектор. Камни с цветом "Bi-Color", "Two-Tone", "Watermelon",
+     или тип "ametrine" получают в позитив дескриптор цветового перехода.
+     Лечит кейс "Bi-Color Tourmaline → монохромный жёлтый камень".
+  4. Anti-halo защита для серых/тёмных невыразительных камней
+     (Dark Grey/Black Spinel и т.п.). В негатив добавляются токены против
+     halo pavé обрамления — это источник призраков "второго камня в виде
+     pavé halo вокруг центрального".
+
+Изменения от v6.4 (унаследовано):
   1. METALS: одна фраза с весом 1.3 (было три фразы 1.5+1.4+1.3).
-     Убирает "малиновый камень → жёлтый" проблему.
   2. Дубль якоря изделия в конце позитива: (elegant ring:1.5).
-     Без него v6.7 на референсе "камень-в-пальцах" Tile тащил
-     композицию "пустое кольцо отдельно от камня".
 
-Что НЕ делаем в v6.7.1 (вынесено в roadmap):
+Что НЕ делаем (вынесено в roadmap):
   - Anti-warm-tone защита (v6.5) — давала ложные срабатывания
   - STONE_DESCRIPTORS / спец-якоря (v6.6) — давали "камень на постаменте"
   - WEAK_VISUAL_STONES пресеты Tile (v6.6) — для прозрачных камней
@@ -263,6 +267,41 @@ def build_color_negative(stone_color, stone_type):
     return ", ".join(f"{d} {stone_type}" for d in filtered)
 
 
+# v6.7.2: Bi-Color детектор
+# Срабатывает на маркеры в названии цвета или на тип камня "ametrine"
+# (аметрин — природный bi-color аметист+цитрин).
+BI_COLOR_MARKERS = {"bi-color", "bicolor", "bi color", "two-tone", "two tone",
+                    "watermelon", "ametrine", "parti"}
+BI_COLOR_STONE_TYPES = {"ametrine"}
+
+
+def is_bi_color(stone_color, stone_type):
+    color_lower = (stone_color or "").lower()
+    type_lower = (stone_type or "").lower()
+    if type_lower in BI_COLOR_STONE_TYPES:
+        return True
+    for marker in BI_COLOR_MARKERS:
+        if marker in color_lower:
+            return True
+    return False
+
+
+# v6.7.2: Anti-halo защита для серых/тёмных невыразительных камней.
+# На таких камнях модель часто рисует halo pavé обрамление, которое
+# выглядит как "второй камень внутри" или "призрак" — потому что
+# яркие маленькие диаманты halo видны лучше чем тусклый центральный камень.
+DARK_MUTED_COLOR_MARKERS = {"grey", "gray", "black", "smoky", "smokey",
+                            "dark", "charcoal"}
+
+
+def is_dark_muted_stone(stone_color, stone_type):
+    color_lower = (stone_color or "").lower()
+    for marker in DARK_MUTED_COLOR_MARKERS:
+        if marker in color_lower:
+            return True
+    return False
+
+
 def build_prompt(params):
     jewelry_type  = clean_str(params.get("jewelry_type"), "ring").lower()
     stone_type    = normalize_stone_type(params.get("stone_type"))
@@ -301,11 +340,21 @@ def build_prompt(params):
     diamonds_phrase = ", with small accent diamonds" if with_diamonds else ""
     wishes_phrase = f", {custom_wishes}" if custom_wishes else ""
 
+    # v6.7.2: Bi-Color дескриптор. Подсказывает модели что камень
+    # двухцветный с плавным переходом. Без этого модель усредняет в один цвет.
+    bicolor_phrase = ""
+    if is_bi_color(stone_color, stone_type):
+        bicolor_phrase = (
+            ", (bi-color gemstone with two distinct color zones:1.4), "
+            "(visible color transition through the stone:1.3), "
+            "split color gemstone"
+        )
+
     positive = (
         f"vocgems jewelry, {weighted_anchor}, "
         f"(professional product catalog photography:1.5), "
         f"(commercial jewelry catalog:1.4), "
-        f"{stone_desc}, {metal_phrase}, {style_phrase}{diamonds_phrase}{wishes_phrase}, "
+        f"{stone_desc}{bicolor_phrase}, {metal_phrase}, {style_phrase}{diamonds_phrase}{wishes_phrase}, "
         f"(pure white seamless background:1.6), "
         f"(plain white studio backdrop:1.5), "
         f"professional studio lighting, soft shadows, "
@@ -323,6 +372,19 @@ def build_prompt(params):
     color_neg_part = f"{color_neg}, " if color_neg else ""
     metal_neg = METAL_NEG.get(metal_key, "")
     metal_neg_part = f"{metal_neg}, " if metal_neg else ""
+
+    # v6.7.2: Anti-halo для тёмных невыразительных камней.
+    # На сером/чёрном камне модель рисует halo pavé, которое создаёт
+    # эффект "призрака второго камня" внутри/вокруг основного.
+    anti_halo_part = ""
+    if is_dark_muted_stone(stone_color, stone_type) and not with_diamonds:
+        anti_halo_part = (
+            "(halo setting:1.5), (pave halo:1.5), "
+            "(accent diamonds around stone:1.4), "
+            "(small stones inside main gem:1.5), "
+            "(diamond cluster around center stone:1.4), "
+        )
+
     negative = (
         f"(woman:1.6), (man:1.6), (person:1.6), (human:1.6), (people:1.6), "
         f"(face:1.6), (portrait:1.6), (model:1.6), "
@@ -334,6 +396,7 @@ def build_prompt(params):
         f"{type_neg}, "
         f"{color_neg_part}"
         f"{metal_neg_part}"
+        f"{anti_halo_part}"
         f"(flower:1.5), (petals:1.5), (leaves:1.4), (plants:1.4), "
         f"(fabric:1.5), (cloth:1.5), (silk:1.4), (paper:1.4), (textured background:1.4), "
         f"(colored background:1.5), (pastel background:1.5), (artistic background:1.5), "
