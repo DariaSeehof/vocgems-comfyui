@@ -1,22 +1,19 @@
 """
 VOC Gems RunPod Serverless Handler
+v6.6.2: фикс рубина (Red → тёмный бордовый) + фантом второго камня.
+        - "red" добавлен в cold_stone_colors (для ювелирки красный надо
+          защищать от перетекания в тёплое золото)
+        - UNUSUAL_COLOR_MARKERS: + "pure", "true", "blood", "pigeon"
+          (ярко-красные рубины должны триггерить unusual 1.7)
+        - "single piece centered" → "(single centered gemstone:1.5)" с весом,
+          плюс "extra gem floating, stone above main" в негатив
+          (попытка убрать фантом второго камня в верхней половине)
+
 v6.6.1: фикс "камень-постамент" — танзанит был на широком золотом основании,
-        а не в кольце. Причина: спец-дескриптор камня (вес 1.5) перевешивал
-        якорь типа изделия (вес 1.4) и шёл в конце позитива → модель делала
-        камень главным субъектом.
-        - JEWELRY_ANCHORS weight: 1.4 → 1.6
-        - STONE_DESCRIPTORS weights: 1.5/1.4 → 1.3/1.2
-        - Universal stone anchor weight: 1.4 → 1.3
-        - Дубль якоря типа изделия (1.5) в конце позитива — финальное напоминание
+        а не в кольце.
 
 v6.6: поддержка бледных/прозрачных камней (Moonstone, Opal, Pearl, Diamond,
       Pastel/Light/Milky-цвета).
-      - WEAK_VISUAL_STONES: камни с слабым цветовым сигналом → Tile понижен
-      - PALE_COLOR_MARKERS: бледные цвета (pastel, light, milky) → Tile средний
-      - STONE_DESCRIPTORS: специфичные якоря по типу камня
-      - CABOCHON_DEFAULT_STONES: лунный/опал/жемчуг идут как cabochon
-      - Anti-warm-tone защита для прозрачных камней (мягче, вес 1.4)
-      - Adaptive ControlNet: strength/end_percent зависят от силы сигнала
 """
 
 import runpod
@@ -236,6 +233,8 @@ STONE_DEFAULT_COLORS = {
 UNUSUAL_COLOR_MARKERS = {
     # Интенсивность (v6.5: добавлено — чтобы "Vivid Pink" триггерил защиту цвета)
     "vivid", "bright", "intense", "hot", "saturated", "electric", "neon", "rich",
+    # v6.6.2: + чистота/насыщенность для рубинов и сапфиров
+    "pure", "true", "blood", "pigeon", "royal",
     # Светлота / приглушённость
     "pastel", "light", "pale", "soft", "muted",
     "dark", "deep",
@@ -418,7 +417,8 @@ def build_prompt(params):
         f"professional studio lighting, soft shadows, "
         f"8k resolution, sharp focus, "
         f"(isolated product shot:1.4), (no people:1.6), product only, "
-        f"single piece centered, jewelry store catalog aesthetic"
+        f"(single centered gemstone:1.5), (one stone only:1.4), "
+        f"jewelry store catalog aesthetic"
     )
 
     type_neg = JEWELRY_NEG.get(jewelry_type, "")
@@ -432,7 +432,9 @@ def build_prompt(params):
     # v6.6: + прозрачные камни (weak_visual) при warm-металле, вес 1.4 (мягче,
     # чтобы не сделать камень совсем бесцветным и не убрать золотые рефлексы)
     metal_tone = METAL_TONE.get(metal_key, "warm")
-    cold_stone_colors = {"pink", "blue", "green", "violet", "purple", "magenta",
+    # v6.6.2: добавлен "red" — для ювелирки красный (рубин, шпинель красная) надо
+    # защищать от перетекания в тёплое золото, иначе камень становится бордовым/винным.
+    cold_stone_colors = {"pink", "red", "blue", "green", "violet", "purple", "magenta",
                          "fuchsia", "lavender", "lilac", "teal", "mint", "raspberry",
                          "crimson", "rubellite"}
     stone_is_cold = stone_color and any(c in stone_color.lower() for c in cold_stone_colors)
@@ -470,7 +472,10 @@ def build_prompt(params):
         f"(colored background:1.5), (pastel background:1.5), (artistic background:1.5), "
         f"(creative composition:1.4), (lifestyle setting:1.4), "
         f"cartoon, illustration, painting, sketch, anime, 3d render, CGI, "
-        f"blurry, soft focus, low quality, deformed, floating stones, "
+        f"blurry, soft focus, low quality, deformed, "
+        f"(floating stones:1.5), (extra gem floating:1.5), "
+        f"(stone above main:1.5), (gemstone in upper area:1.4), "
+        f"(second gem:1.4), (additional stone:1.4), "
         f"watermark, text, logo, "
         f"vogue magazine, fashion photography, lifestyle photography, editorial, "
         f"jewelry on model, jewelry being worn, jewelry being held, "
