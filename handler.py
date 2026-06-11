@@ -1,31 +1,44 @@
 """
 VOC Gems RunPod Serverless Handler
-v6.7.2: STABLE BASELINE v6.7.1 + две точечные правки под кейсы из тестов 14.05.
+v6.7.4: v6.7.3 + переключатель LoRA (v2/v3) через job_input.
 
-Изменения от v6.7.1:
-  3. BI-COLOR детектор. Камни с цветом "Bi-Color", "Two-Tone", "Watermelon",
-     или тип "ametrine" получают в позитив дескриптор цветового перехода.
-     Лечит кейс "Bi-Color Tourmaline → монохромный жёлтый камень".
-  4. Anti-halo защита для серых/тёмных невыразительных камней
-     (Dark Grey/Black Spinel и т.п.). В негатив добавляются токены против
-     halo pavé обрамления — это источник призраков "второго камня в виде
-     pavé halo вокруг центрального".
+Изменения от v6.7.3:
+  - Добавлена поддержка двух LoRA: v2 (прод, дефолт) и v3 (новая, тест).
+  - При старте симлинкуются ОБЕ LoRA, если найдены на томе.
+  - job_input["lora_version"] = "v3" → workflow берёт v3.
+    По умолчанию (или "v2") → v2. Прод не меняется без явного флага.
+  - LORA_FILES: словарь версия → имя файла.
+  - resolve_lora_name(job_input) выбирает имя по флагу.
+  - get_workflow_basic / get_workflow_controlnet принимают lora_name.
+
+v6.7.3: STABLE BASELINE v6.7.2 + три точечные правки.
+
+Изменения от v6.7.2:
+  5. STONE_DEFAULT_COLORS: добавлены peridot, citrine, chrysoberyl,
+     tsavorite, paraiba, zircon, kunzite, moonstone. Раньше эти камни
+     попадали в is_unusual_color=True (defaults пустой → True), что
+     давало неверное поведение build_color_negative.
+  6. STONE_HARD_NEGATIVES: точечные негативы для камней, у которых
+     SD1.5 имеет испорченный дефолт.
+     - peridot: блокируем yellow/olive/brownish (Vivid Green → жёлтый)
+     - citrine: блокируем brown/whisky/muddy yellow
+  7. Anti-halo НЕ расширен на крупные камни.
+     Тесты показали что это ломает Tourmaline Lagoon 12.75ct.
+
+Изменения от v6.7.2 (унаследовано):
+  3. BI-COLOR детектор — два цвета.
+  4. Anti-halo для тёмных невыразительных камней (Grey/Black/Dark).
 
 Изменения от v6.4 (унаследовано):
-  1. METALS: одна фраза с весом 1.3 (было три фразы 1.5+1.4+1.3).
-  2. Дубль якоря изделия в конце позитива: (elegant ring:1.5).
+  1. METALS: одна фраза с весом 1.3.
+  2. Дубль якоря изделия в конце позитива.
 
 Что НЕ делаем (вынесено в roadmap):
   - Anti-warm-tone защита (v6.5) — давала ложные срабатывания
   - STONE_DESCRIPTORS / спец-якоря (v6.6) — давали "камень на постаменте"
   - WEAK_VISUAL_STONES пресеты Tile (v6.6) — для прозрачных камней
     отдельный pipeline в v6.8
-  - Anti-floating-gem (v6.6.2) — фантомы — артефакт денойза, лечим иначе
-
-Baseline для ярких цветных камней:
-  ruby, emerald, sapphire (вкл. royal blue), tourmaline (вкл. rubellite),
-  spinel (vivid colors), garnet (вкл. spessartite), tanzanite, amethyst,
-  morganite, alexandrite.
+  - Anti-floating-gem (v6.6.2) — фантомы — артефакт денойза
 """
 
 import runpod
@@ -43,6 +56,24 @@ comfyui_process = None
 # ─── Базовая модель (checkpoint) ───
 CHECKPOINT_NAME = "juggernaut_reborn.safetensors"
 
+# ─── LoRA: две версии ───
+# v2 — прод (дефолт). v3 — новая обученная LoRA, тестируется по флагу.
+# Имя файла на томе → /runpod-volume/lora/<файл>
+LORA_FILES = {
+    "v2": "vocgems_jewelry_v2.safetensors",
+    "v3": "vocgems_jewelry_v3.safetensors",
+}
+DEFAULT_LORA_VERSION = "v2"   # прод не меняется без явного флага lora_version
+
+
+def resolve_lora_name(job_input):
+    """Выбирает имя файла LoRA по флагу job_input['lora_version'].
+    Неизвестное/пустое значение → дефолтная версия (v2, прод)."""
+    version = str(job_input.get("lora_version", DEFAULT_LORA_VERSION)).strip().lower()
+    if version not in LORA_FILES:
+        version = DEFAULT_LORA_VERSION
+    return LORA_FILES[version]
+
 # ─── ControlNet параметры ───
 # Tile передаёт ЦВЕТ и общую структуру референса, а не контуры.
 # Это означает: цвет камня будет точно с фото, форма даст модели больше свободы,
@@ -58,16 +89,16 @@ def start_comfyui():
     global comfyui_process
     os.chdir("/workspace/ComfyUI")
 
-    # ─── Симлинк LoRA ───
-    lora_src = os.environ.get("LORA_PATH", "/runpod-volume/lora/vocgems_jewelry_v2.safetensors")
-    lora_dst = "/workspace/ComfyUI/models/loras/vocgems_jewelry_v2.safetensors"
-
-    if os.path.exists(lora_src) and not os.path.exists(lora_dst):
-        os.makedirs("/workspace/ComfyUI/models/loras", exist_ok=True)
-        os.symlink(lora_src, lora_dst)
-        print(f"LoRA linked: {lora_src} -> {lora_dst}", flush=True)
-    elif not os.path.exists(lora_src):
-        print(f"WARNING: LoRA not found at {lora_src}", flush=True)
+    # ─── Симлинк LoRA (все версии: v2 прод + v3 тест) ───
+    os.makedirs("/workspace/ComfyUI/models/loras", exist_ok=True)
+    for ver, fname in LORA_FILES.items():
+        lora_src = f"/runpod-volume/lora/{fname}"
+        lora_dst = f"/workspace/ComfyUI/models/loras/{fname}"
+        if os.path.exists(lora_src) and not os.path.exists(lora_dst):
+            os.symlink(lora_src, lora_dst)
+            print(f"LoRA linked ({ver}): {lora_src} -> {lora_dst}", flush=True)
+        elif not os.path.exists(lora_src):
+            print(f"WARNING: LoRA {ver} not found at {lora_src}", flush=True)
 
     # ─── Симлинк Checkpoint ───
     ckpt_src = os.environ.get("CKPT_PATH", f"/runpod-volume/checkpoints/{CHECKPOINT_NAME}")
@@ -227,6 +258,17 @@ STONE_DEFAULT_COLORS = {
     "diamond":     ["white", "colorless"],
     "pearl":       ["white"],
     "opal":        ["white"],
+    # v6.7.3: добавлены камни из каталога VOC Gems, которых не было.
+    # Без записи в словаре is_unusual_color возвращал True (defaults пустой)
+    # для ЛЮБОГО цвета, что давало неверный вес 1.7 даже для дефолтных цветов.
+    "peridot":     ["green"],
+    "citrine":     ["yellow", "orange"],
+    "chrysoberyl": ["yellow", "green"],
+    "tsavorite":   ["green"],
+    "paraiba":     ["blue", "green"],
+    "zircon":      ["blue"],
+    "kunzite":     ["pink"],
+    "moonstone":   ["white", "colorless"],
 }
 
 UNUSUAL_COLOR_MARKERS = {
@@ -235,6 +277,20 @@ UNUSUAL_COLOR_MARKERS = {
     "grey", "gray", "champagne", "peach", "salmon",
     "cognac", "honey", "lavender", "lilac", "mint",
     "teal", "olive", "neon", "smoky", "smokey",
+}
+
+
+# v6.7.3: Точечные негативы для конкретных типов камней,
+# у которых SD1.5 имеет "испорченное" дефолтное представление.
+# Применяются ВСЕГДА для данного типа камня, независимо от цвета.
+STONE_HARD_NEGATIVES = {
+    # Peridot: SD1.5 тянет в жёлто-зелёный/оливковый по умолчанию.
+    # Для Vivid Green нам нужен чистый зелёный без жёлтых нот.
+    "peridot": "(yellow peridot:1.5), (olive peridot:1.4), "
+               "(yellowish gemstone:1.4), (brownish stone:1.4)",
+    # Citrine: иногда сваливается в "оранжево-коричневый/виски" — для
+    # чистого жёлтого/яркого блокируем коричневые тона.
+    "citrine": "(brown citrine:1.3), (whisky color:1.3), (muddy yellow:1.3)",
 }
 
 
@@ -373,6 +429,10 @@ def build_prompt(params):
     metal_neg = METAL_NEG.get(metal_key, "")
     metal_neg_part = f"{metal_neg}, " if metal_neg else ""
 
+    # v6.7.3: точечный негатив по типу камня (для peridot/citrine)
+    stone_hard_neg = STONE_HARD_NEGATIVES.get(stone_type, "")
+    stone_hard_neg_part = f"{stone_hard_neg}, " if stone_hard_neg else ""
+
     # v6.7.2: Anti-halo для тёмных невыразительных камней.
     # На сером/чёрном камне модель рисует halo pavé, которое создаёт
     # эффект "призрака второго камня" внутри/вокруг основного.
@@ -395,6 +455,7 @@ def build_prompt(params):
         f"mannequin, doll, statue, "
         f"{type_neg}, "
         f"{color_neg_part}"
+        f"{stone_hard_neg_part}"
         f"{metal_neg_part}"
         f"{anti_halo_part}"
         f"(flower:1.5), (petals:1.5), (leaves:1.4), (plants:1.4), "
@@ -459,7 +520,7 @@ def download_reference_image(url, timeout=15):
 
 # ─── WORKFLOWS ────────────────────────────────────────────────────────────────
 
-def get_workflow_basic(positive, negative, seed=None):
+def get_workflow_basic(positive, negative, lora_name, seed=None):
     """Старый workflow без ControlNet — fallback."""
     if seed is None:
         seed = int(time.time()) % 1000000000
@@ -485,14 +546,14 @@ def get_workflow_basic(positive, negative, seed=None):
         "10": {
             "class_type": "LoraLoader",
             "inputs": {
-                "clip": ["4", 1], "lora_name": "vocgems_jewelry_v2.safetensors",
+                "clip": ["4", 1], "lora_name": lora_name,
                 "model": ["4", 0], "strength_clip": 0.5, "strength_model": 0.5
             }
         }
     }
 
 
-def get_workflow_controlnet(positive, negative, reference_filename, seed=None):
+def get_workflow_controlnet(positive, negative, reference_filename, lora_name, seed=None):
     """Workflow с ControlNet Canny.
     Reference картинка → Canny preprocessor → ControlNetApplyAdvanced → KSampler.
     LoRA остаётся, всё остальное идентично базовому workflow."""
@@ -512,7 +573,7 @@ def get_workflow_controlnet(positive, negative, reference_filename, seed=None):
         "10": {
             "class_type": "LoraLoader",
             "inputs": {
-                "clip": ["4", 1], "lora_name": "vocgems_jewelry_v2.safetensors",
+                "clip": ["4", 1], "lora_name": lora_name,
                 "model": ["4", 0], "strength_clip": 0.5, "strength_model": 0.5
             }
         },
@@ -636,6 +697,10 @@ def handler(job):
 
     positive, negative = build_prompt(job_input)
 
+    # ─── Выбор версии LoRA (v2 прод по умолчанию, v3 по флагу) ───
+    lora_name = resolve_lora_name(job_input)
+    print(f"=== Using LoRA: {lora_name} ===", flush=True)
+
     # ─── Решаем: используем ControlNet или нет ───
     reference_url = job_input.get("reference_image_url", "").strip() if job_input.get("reference_image_url") else ""
     reference_filename = None
@@ -659,9 +724,9 @@ def handler(job):
 
     # ─── Строим workflow ───
     if use_controlnet:
-        workflow = get_workflow_controlnet(positive, negative, reference_filename)
+        workflow = get_workflow_controlnet(positive, negative, reference_filename, lora_name)
     else:
-        workflow = get_workflow_basic(positive, negative)
+        workflow = get_workflow_basic(positive, negative, lora_name)
 
     try:
         result = queue_prompt(workflow)
@@ -685,7 +750,8 @@ def handler(job):
         "image": image_base64,
         "prompt_id": prompt_id,
         "filename": filename,
-        "controlnet_used": use_controlnet
+        "controlnet_used": use_controlnet,
+        "lora_used": lora_name
     }
 
 
