@@ -1,5 +1,18 @@
 """
 VOC Gems RunPod Serverless Handler
+v6.7.5: v6.7.4 + жёсткая передача формы огранки (shape/cut).
+
+Изменения от v6.7.4:
+  - CUT_SHAPE_MAP: словарь форм огранки → (позитив с высоким весом,
+    негатив чужих форм). Раньше форма шла сырым словом без веса
+    ("octagon cut") и модель её игнорировала — octagon становился round.
+  - resolve_cut(stone_cut): нормализует вход (Octagon / octagon cut /
+    emerald → одна понятная модели фраза) и отдаёт ювелирные синонимы
+    (octagon = emerald/step cut), которые SD1.5 понимает лучше "octagon".
+  - В позитиве форма теперь с весом 1.4-1.5; в негативе блокируются
+    конкурирующие формы (round/oval и т.п.), чтобы модель не усредняла.
+  - Неизвестные формы — как раньше (умеренный вес, без негатива).
+
 v6.7.4: v6.7.3 + переключатель LoRA (v2/v3) через job_input.
 
 Изменения от v6.7.3:
@@ -358,6 +371,72 @@ def is_dark_muted_stone(stone_color, stone_type):
     return False
 
 
+# v6.7.5: Жёсткая передача ФОРМЫ ОГРАНКИ.
+# Проблема: форма камня (octagon и т.п.) игнорировалась моделью — octagon
+# превращался в round/oval. Причина: форма шла без веса и сырым словом,
+# а SD1.5 лучше понимает ювелирные синонимы (octagon = emerald/step cut).
+# Решение: нормализуем название огранки в понятную модели фразу +
+# добавляем форму с высоким весом в позитив + блокируем чужие формы в негативе.
+#
+# Ключ — нормализованное входное значение (lower, без " cut").
+# Значение: (phrase_for_positive, negatives_for_other_shapes)
+CUT_SHAPE_MAP = {
+    "octagon":      ("(emerald cut octagonal step-cut gemstone:1.5), (rectangular stone with cut corners:1.4), elongated rectangular faceted stone",
+                     "round stone, oval stone, circular gem, pear shape, cushion shape, heart shape, marquise"),
+    "emerald":      ("(emerald cut step-cut gemstone:1.5), (rectangular stone with cut corners:1.4), elongated rectangular faceted stone",
+                     "round stone, oval stone, circular gem, pear shape, cushion shape, heart shape, marquise"),
+    "emerald cut":  ("(emerald cut step-cut gemstone:1.5), (rectangular stone with cut corners:1.4), elongated rectangular faceted stone",
+                     "round stone, oval stone, circular gem, pear shape, cushion shape, heart shape, marquise"),
+    "baguette":     ("(baguette cut:1.5), (long narrow rectangular step-cut stone:1.4)",
+                     "round stone, oval stone, circular gem, square stone, pear shape, cushion shape"),
+    "round":        ("(round brilliant cut:1.5), (circular faceted gemstone:1.4)",
+                     "rectangular stone, square stone, oval stone, pear shape, emerald cut, octagon, marquise"),
+    "oval":         ("(oval cut:1.5), (elliptical faceted gemstone:1.4)",
+                     "round circular stone, rectangular stone, square stone, pear shape, heart shape"),
+    "cushion":      ("(cushion cut:1.5), (square stone with rounded corners:1.4), pillow-shaped faceted gemstone",
+                     "round stone, rectangular stone, pear shape, marquise, emerald cut"),
+    "pear":         ("(pear cut:1.5), (teardrop-shaped faceted gemstone:1.5), drop shape stone",
+                     "round stone, oval stone, square stone, rectangular stone, heart shape, cushion"),
+    "teardrop":     ("(pear cut:1.5), (teardrop-shaped faceted gemstone:1.5), drop shape stone",
+                     "round stone, oval stone, square stone, rectangular stone, heart shape, cushion"),
+    "marquise":     ("(marquise cut:1.5), (elongated pointed oval gemstone:1.4), navette shape",
+                     "round stone, square stone, rectangular stone, cushion, emerald cut"),
+    "heart":        ("(heart cut:1.5), (heart-shaped faceted gemstone:1.5)",
+                     "round stone, oval stone, square stone, rectangular stone, pear shape"),
+    "princess":     ("(princess cut:1.5), (square faceted gemstone with sharp corners:1.4)",
+                     "round stone, oval stone, pear shape, emerald cut, cushion rounded corners"),
+    "square":       ("(square cut gemstone:1.5), (square faceted stone:1.4)",
+                     "round stone, oval stone, rectangular elongated stone, pear shape"),
+    "radiant":      ("(radiant cut:1.5), (rectangular brilliant-cut gemstone with trimmed corners:1.4)",
+                     "round stone, oval stone, pear shape, marquise, heart shape"),
+    "asscher":      ("(asscher cut:1.5), (square step-cut gemstone with cropped corners:1.4)",
+                     "round stone, oval stone, pear shape, marquise, elongated rectangle"),
+    "trillion":     ("(trillion cut:1.5), (triangular faceted gemstone:1.5)",
+                     "round stone, oval stone, square stone, rectangular stone, pear shape"),
+    "round brilliant": ("(round brilliant cut:1.5), (circular faceted gemstone:1.4)",
+                     "rectangular stone, square stone, oval stone, pear shape, emerald cut, octagon"),
+}
+
+
+def resolve_cut(stone_cut):
+    """
+    Возвращает (positive_phrase, shape_negative) по форме огранки.
+    Принимает сырое значение (может быть 'Octagon', 'octagon cut', 'emerald' и т.п.).
+    Если форма неизвестна — нейтральная фраза, без блокировки (как раньше).
+    """
+    raw = (stone_cut or "").strip().lower()
+    if not raw:
+        return ("(faceted cut:1.3)", "")
+    # снимаем хвост " cut", чтобы 'octagon cut' и 'octagon' матчились одинаково
+    key = raw[:-4].strip() if raw.endswith(" cut") else raw
+    if key in CUT_SHAPE_MAP:
+        return CUT_SHAPE_MAP[key]
+    if raw in CUT_SHAPE_MAP:
+        return CUT_SHAPE_MAP[raw]
+    # неизвестная форма — отдаём как есть, с умеренным весом, без негатива
+    return (f"({raw} cut:1.4), {raw} shape faceted gemstone", "")
+
+
 def build_prompt(params):
     jewelry_type  = clean_str(params.get("jewelry_type"), "ring").lower()
     stone_type    = normalize_stone_type(params.get("stone_type"))
@@ -388,8 +467,9 @@ def build_prompt(params):
         color_emphasis = f"{stone_type}, "
 
     origin_part = f", from {stone_origin}" if stone_origin else ""
-    cut_part = f"{stone_cut} cut" if stone_cut else "faceted cut"
-    stone_desc = f"{color_emphasis}{stone_carat} carat, {cut_part}{origin_part}"
+    # v6.7.5: форма огранки теперь с высоким весом + ювелирные синонимы.
+    cut_phrase, cut_negative = resolve_cut(stone_cut)
+    stone_desc = f"{color_emphasis}{stone_carat} carat, {cut_phrase}{origin_part}"
 
     metal_phrase = METALS.get(metal_key, METALS["gold_750"])
     style_phrase = STYLES.get(style_key, STYLES["modern"])
@@ -445,6 +525,9 @@ def build_prompt(params):
             "(diamond cluster around center stone:1.4), "
         )
 
+    # v6.7.5: блокируем чужие формы огранки, чтобы octagon не стал round/oval
+    cut_neg_part = f"({cut_negative}:1.3), " if cut_negative else ""
+
     negative = (
         f"(woman:1.6), (man:1.6), (person:1.6), (human:1.6), (people:1.6), "
         f"(face:1.6), (portrait:1.6), (model:1.6), "
@@ -457,6 +540,7 @@ def build_prompt(params):
         f"{color_neg_part}"
         f"{stone_hard_neg_part}"
         f"{metal_neg_part}"
+        f"{cut_neg_part}"
         f"{anti_halo_part}"
         f"(flower:1.5), (petals:1.5), (leaves:1.4), (plants:1.4), "
         f"(fabric:1.5), (cloth:1.5), (silk:1.4), (paper:1.4), (textured background:1.4), "
